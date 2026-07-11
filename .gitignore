@@ -6,3 +6,4 @@ node_modules/
 .cc-delegate/
 tests/build/
 *.log
+__pycache__/

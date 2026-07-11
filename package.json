@@ -1,6 +1,6 @@
 {
   "name": "cc-delegate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Delegate heavy dev tasks from Claude Code (Opus supervisor) to an autonomous worker on a cheaper model, via MCP.",
   "type": "module",
   "bin": {
