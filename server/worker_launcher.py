@@ -28,12 +28,14 @@ WORKER_SCRIPT = str(Path(__file__).resolve().parent.parent / "worker" / "worker.
 
 
 def _build_args(cfg: Config, args: dict[str, Any]) -> list[str]:
+    # Model and key env var are resolved per task (config_store profile or
+    # legacy env defaults) and passed in via `args` by main.py.
     cli = [
         "run", WORKER_SCRIPT,
         "--worktree", args["worktree"],
         "--spec", args["spec"],
-        "--model", cfg.model,
-        "--api-key-env-var", cfg.api_key_env_var,
+        "--model", args.get("model") or cfg.model,
+        "--api-key-env-var", args.get("api_key_env_var") or cfg.api_key_env_var,
         "--recursion-limit", str(args["recursion_limit"]),
         "--rubric-max-iterations", str(args["rubric_max_iterations"]),
     ]
@@ -46,6 +48,16 @@ def _build_args(cfg: Config, args: dict[str, Any]) -> list[str]:
 
 async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], timeout_ms: int) -> None:
     """Run one delegated task to completion, mutating + persisting `job`."""
+    # OAuth-based profiles (github_copilot, chatgpt) have no API key — the
+    # worker must then run WITHOUT DELEGATE_API_KEY so litellm falls back to
+    # its own token caches.
+    env = {**os.environ}
+    resolved_key = args.get("api_key") or cfg.worker_api_key
+    if resolved_key:
+        env["DELEGATE_API_KEY"] = resolved_key
+    else:
+        env.pop("DELEGATE_API_KEY", None)
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "uv", *_build_args(cfg, args),
@@ -54,7 +66,7 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            env={**os.environ, "DELEGATE_API_KEY": cfg.worker_api_key},
+            env=env,
         )
     except FileNotFoundError:
         job["status"] = "failed"

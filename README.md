@@ -128,11 +128,28 @@ prompt). The supervisor always reviews the resulting diff before deciding whethe
 
 ## Configuration
 
-See [`.env.example`](.env.example) for `DELEGATE_API_KEY`, `DELEGATE_MODEL`,
-`DELEGATE_API_KEY_ENV_VAR`, and the guardrails (`DELEGATE_RECURSION_LIMIT`,
-`DELEGATE_RUBRIC_MAX_ITERATIONS`, `DELEGATE_TIMEOUT_MS`). Swap `DELEGATE_MODEL`'s litellm
-provider prefix (and the matching `DELEGATE_API_KEY_ENV_VAR`) to target any other provider —
-see [litellm's provider list](https://docs.litellm.ai/docs/providers).
+**The facade (preferred):** the plugin configures itself through its own MCP tools, driven
+conversationally from Claude Code — no restart needed, changes apply to the next task:
+
+- *"Show me the provider status"* → `provider_status` lists your model profiles, the default,
+  and per-profile auth state (key reachable? OAuth token cache present?).
+- *"Add a deepseek profile"* → `set_model_profile("deepseek", "litellm:deepseek/deepseek-chat",
+  "DEEPSEEK_API_KEY")`; `set_default_profile` / `remove_model_profile` manage the menu.
+- *"Store my key for the deepseek profile"* → `store_api_key("deepseek")` asks you for the key
+  through a native Claude Code dialog (MCP elicitation, Claude Code >= 2.1.199): **the secret
+  goes straight back to the server without ever entering the model's conversation.**
+- Per task: *"delegate this on the deepseek profile"* → `run_dev_task(..., profile="deepseek")`.
+  The supervisor's skill forbids it from picking a non-default profile on its own.
+
+Profiles live in `~/.cc-delegate/config.json`, facade-stored keys in
+`~/.cc-delegate/credentials.json`. Any litellm-routable model works — see
+[litellm's provider list](https://docs.litellm.ai/docs/providers).
+
+**Legacy env path (still supported):** see [`.env.example`](.env.example) for
+`DELEGATE_API_KEY`, `DELEGATE_MODEL`, `DELEGATE_API_KEY_ENV_VAR`, and the guardrails
+(`DELEGATE_RECURSION_LIMIT`, `DELEGATE_RUBRIC_MAX_ITERATIONS`, `DELEGATE_TIMEOUT_MS`). It
+applies when no profile is defined; env changes require restarting Claude Code (the
+restart-trap warning in Install step 3 only concerns this path).
 
 `DELEGATE_MAX_BUDGET_USD` is accepted and surfaced in `cost_usd`, but it is not yet enforced
 mid-run: deepagents/LangGraph has no built-in budget cut-off hook, so the value is reported for

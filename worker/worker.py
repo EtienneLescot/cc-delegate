@@ -220,11 +220,11 @@ def main() -> int:
     p.add_argument("--rubric-max-iterations", type=int, default=6)
     args = p.parse_args()
 
+    # DELEGATE_API_KEY is optional: OAuth-based providers (github_copilot,
+    # chatgpt) authenticate from litellm's local token caches instead of a key.
     api_key = os.environ.get("DELEGATE_API_KEY")
-    if not api_key:
-        print(json.dumps({"status": "failed", "error": "DELEGATE_API_KEY missing"}))
-        return 1
-    os.environ[args.api_key_env_var] = api_key
+    if api_key:
+        os.environ[args.api_key_env_var] = api_key
 
     # Filter the env before handing it to LocalShellBackend so the agent can't
     # echo host secrets (DELEGATE_API_KEY, the provider key, GITHUB_TOKEN, ...)

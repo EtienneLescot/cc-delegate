@@ -8,7 +8,9 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Config:
-    worker_api_key: str
+    # Legacy env key; may be None now that profiles/credentials (config_store)
+    # and OAuth providers exist. Key resolution happens per task.
+    worker_api_key: str | None
     api_key_env_var: str
     model: str
     default_recursion_limit: int
@@ -19,11 +21,8 @@ class Config:
 
 
 def load_config() -> Config:
-    worker_api_key = os.environ.get("DELEGATE_API_KEY")
-    if not worker_api_key:
-        raise RuntimeError("DELEGATE_API_KEY is required")
     return Config(
-        worker_api_key=worker_api_key,
+        worker_api_key=os.environ.get("DELEGATE_API_KEY"),
         # Provider-specific env var litellm reads for DELEGATE_MODEL's provider
         # prefix (e.g. MINIMAX_API_KEY for "minimax/..."). Change alongside
         # DELEGATE_MODEL when switching providers.

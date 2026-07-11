@@ -32,8 +32,27 @@ provider works).
 5. **Decide.** Present the diff to the user. You (with the user) decide whether to merge branch
    `delegate/<task_id>`. The worker never pushes or merges.
 
+## Model profiles
+
+`run_dev_task` accepts an optional `profile` name resolved against the user's configured menu
+(see `provider_status`). **The user owns model selection**: only pass a non-default `profile`
+when the user explicitly asked for it in this conversation ("delegate this on the cheap
+profile"). Quotas, keys, and knowledge of which models work belong to the user.
+
+## Configuration tools — explicit user request only
+
+The `provider_status` / `set_model_profile` / `remove_model_profile` / `set_default_profile` /
+`store_api_key` / `auth_status` tools change what the worker spends money on. Call them ONLY
+when the user explicitly asked for a configuration change. Never reconfigure as a side effect
+of a failing delegation — report the failure and let the user decide. For API keys, prefer
+calling `store_api_key` WITHOUT the `key` argument: the server asks the user directly through
+an elicitation dialog and the secret never enters this conversation; if you pass `key`
+yourself, tell the user their key transited the chat and suggest rotating it.
+
 ## Rules
 
 - Never set the worker's environment variables in this (supervisor) session — the worker is isolated.
 - Always review the diff before proposing a merge.
 - Prefer one well-scoped delegation over many tiny ones.
+- Delegate bounded modifications of existing code; greenfield synthesis needs file-level
+  skeletons in the spec or should stay with you.

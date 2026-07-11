@@ -3,6 +3,30 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.1
+
+Configuration facade: the plugin configures itself through its own MCP tools.
+
+### Added
+
+- **Six facade tools**: `provider_status`, `set_model_profile`, `remove_model_profile`,
+  `set_default_profile`, `store_api_key`, `auth_status`. Profiles persist in
+  `~/.cc-delegate/config.json` and are read **per task**, so configuration changes apply
+  without restarting Claude Code.
+- **`run_dev_task(profile=...)`**: per-task model selection by profile *name* (never a raw
+  model string). Unknown names error with the list of available profiles.
+- **Secret-safe key entry**: `store_api_key` without a `key` argument asks the user through an
+  MCP elicitation dialog — the secret returns straight to the server and never enters the
+  model's conversation context (verified end-to-end with an elicitation-capable client).
+  Facade-stored keys land in `~/.cc-delegate/credentials.json`; resolution order is
+  credentials file > provider env var > legacy `DELEGATE_API_KEY`.
+- **OAuth-ready plumbing**: `DELEGATE_API_KEY` is now optional end-to-end (server, launcher,
+  worker) so OAuth providers (litellm `github_copilot`/`chatgpt` token caches) can run
+  keyless; `auth_status` reports token-cache presence. Starting a device flow from the facade
+  ships with the v0.4 OAuth work.
+- Skill: sovereignty rules — configuration tools and non-default profiles only on explicit
+  user request; never reconfigure as a side effect of a failing delegation.
+
 ## 0.3.0
 
 Single-runtime migration: the MCP server is now Python.
