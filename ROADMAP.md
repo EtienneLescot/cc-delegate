@@ -20,11 +20,12 @@ See [docs/specs/001-pure-python-migration.md](docs/specs/001-pure-python-migrati
 - [x] **Pure-Python migration** (released 0.3.0): MCP server on the official `mcp` Python SDK,
       everything through `uv run`. Node prerequisite, committed esbuild bundle, and npm chain
       removed — one prerequisite (`uv`) instead of two.
-- [ ] **Model profiles, user-owned** (v0.3.x): the user defines a named menu of models in config
-      (`default`, plus whatever they want); `run_dev_task` accepts a profile *name* only.
-      The supervisor never selects a non-default profile unless the user asked for it —
-      quotas, keys, and model knowledge belong to the user, not the supervisor.
-- [ ] litellm fallback chains (`DELEGATE_MODEL_FALLBACKS`)
+- [ ] **Configuration facade** (v0.3.x, brief: [docs/specs/003](docs/specs/003-config-facade.md)):
+      the plugin configures itself through its own MCP tools — user-owned model profiles,
+      provider switching, API-key placement guidance, OAuth device-flow relay — against a
+      persistent `~/.cc-delegate/config.json` read per-task, so changes apply without
+      restarting Claude Code. Supervisor may only call these on explicit user request.
+- [ ] litellm fallback chains (per profile)
 - [ ] **Per-task observability**: step-by-step `.jsonl` transcript per task. Lesson from two
       budget-burn failures during v0.2.0 development: without a transcript, a recursion-limit
       failure is undebuggable except by forensic worktree inspection.

@@ -84,7 +84,7 @@ observability): brief docs/specs/001.
 | FR-10 | Provider isolation both ways: supervisor session has no worker config; worker shell env has no secrets | ✅ v0.2.0 (name-based filter: API_KEY/APIKEY/TOKEN/SECRET/PASSWORD/CREDENTIAL) |
 | FR-11 | Guardrails: `recursion_limit` (LangGraph steps — every model+tool call), `timeout_ms` (hard abort), rubric `max_iterations` | ✅ |
 | FR-12 | Mid-run budget cut-off on accumulated `cost_usd` | ⏳ planned |
-| FR-13 | User-owned model profiles; per-task profile *name*; supervisor defaults to `default` | ⏳ v0.3.0 |
+| FR-13 | **Configuration facade**: the plugin configures itself through its own MCP tools (profiles, provider switch, API-key placement, OAuth device flows) against a persistent per-user store read per-task — no Claude Code restart. Supervisor may only call these on explicit user request. Subsumes user-owned profiles. | ⏳ v0.3.x, brief: docs/specs/003 |
 | FR-14 | Per-task step-by-step `.jsonl` log for post-mortems | ⏳ v0.3.0 |
 | FR-15 | Subscription providers via OAuth device flow (Copilot; ChatGPT gated on validation spike) | ⏳ v0.4.0, brief: docs/specs/002 |
 
