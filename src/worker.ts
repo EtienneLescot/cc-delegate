@@ -68,6 +68,12 @@ export async function runWorker(cfg: Config, args: RunArgs): Promise<void> {
     }
   } catch (err: any) {
     job.status = "failed";
-    job.error = err?.message ?? String(err);
+    if (err?.code === "ENOENT") {
+      job.error =
+        "'uv' was not found on PATH. The worker needs uv to run worker/worker.py " +
+        "(https://docs.astral.sh/uv/getting-started/installation/).";
+    } else {
+      job.error = err?.message ?? String(err);
+    }
   }
 }

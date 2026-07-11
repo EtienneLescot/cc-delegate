@@ -28,12 +28,14 @@ black-box CLI. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the Claude Agent SDK a
 
 ## Install
 
-Requires Node >= 20 and [uv](https://docs.astral.sh/uv/) (manages the worker's Python
+Requires **Node >= 20** (to run the pre-built `dist/mcp-server.js` — nothing to compile) and
+[**uv**](https://docs.astral.sh/uv/getting-started/installation/) (manages the worker's Python
 environment automatically — no separate `pip install` needed, `uv run` resolves
-`worker/worker.py`'s inline dependencies on first use).
+`worker/worker.py`'s inline dependencies on first use). Claude Code doesn't run `npm install` or
+any build step when installing a plugin, so `dist/mcp-server.js` is committed pre-bundled —
+cloning/installing this repo is enough on its own.
 
 ```bash
-npm install && npm run build
 export DELEGATE_API_KEY=...
 ```
 
@@ -48,6 +50,21 @@ Or install from a marketplace:
 ```bash
 /plugin marketplace add EtienneLescot/cc-delegate
 /plugin install cc-delegate@cc-delegate-marketplace
+```
+
+If `uv` isn't on `PATH`, `run_dev_task` fails fast with a clear error in `get_task_status`/
+`fetch_task_result` (rather than a silent MCP connection failure) telling you to install it.
+
+### For maintainers
+
+`dist/mcp-server.js` is a single-file esbuild bundle (no runtime `node_modules` needed — verified
+by running it with `node_modules` removed). After changing anything under `src/`, rebuild and
+commit the result before pushing:
+
+```bash
+npm install   # dev-time only: typescript, esbuild, @types/node
+npm run build # tsc --noEmit for type-checking, then esbuild bundles dist/mcp-server.js
+git add dist/mcp-server.js
 ```
 
 ## Verify

@@ -1,5 +1,7 @@
 node_modules/
-dist/
+# dist/ is committed on purpose: the plugin's .mcp.json runs dist/mcp-server.js
+# directly, and Claude Code does not run `npm install`/build steps on plugin
+# install (see README "Install" section). Run `npm run build` before committing.
 .env
 .cc-delegate/
 *.log
