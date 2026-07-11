@@ -49,6 +49,9 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
     try:
         proc = await asyncio.create_subprocess_exec(
             "uv", *_build_args(cfg, args),
+            # stdin MUST be detached: this server's own stdin is the MCP
+            # protocol channel, and an inheriting child steals protocol bytes.
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env={**os.environ, "DELEGATE_API_KEY": cfg.worker_api_key},

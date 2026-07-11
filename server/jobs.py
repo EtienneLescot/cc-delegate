@@ -71,8 +71,11 @@ def persist_job(job: dict[str, Any], work_dir: str) -> None:
 
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess[str]:
+    # stdin detached: in the MCP server, inherited stdin is the protocol
+    # channel and any child reading it corrupts the session.
     return subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True,
+        stdin=subprocess.DEVNULL,
     )
 
 
