@@ -11,7 +11,7 @@ The supervisor stays on Anthropic; only the worker is billed on the alternate pr
 ```mermaid
 flowchart LR
   Supervisor["Claude Code supervisor<br/>(Anthropic API)"]
-  MCP["cc-delegate MCP server<br/>Node, stdio<br/>4 tools: run_dev_task,<br/>get_task_status, fetch_task_result,<br/>cleanup_task"]
+  MCP["cc-delegate MCP server<br/>Python (uv run server/main.py), stdio<br/>4 tools: run_dev_task,<br/>get_task_status, fetch_task_result,<br/>cleanup_task"]
   Worktree["Disposable git worktree<br/>branch delegate/&lt;task_id&gt;"]
   Worker["uv run worker/worker.py<br/>deepagents loop<br/>+ implementer / tester / reviewer subagents<br/>+ rubric grader"]
   Provider["Provider<br/>(litellm-routed,<br/>e.g. MiniMax M3)"]
@@ -28,16 +28,17 @@ flowchart LR
   MCP -->|"patch + diff"| Review
 ```
 
-- **`cc-delegate` MCP server** (`src/mcp-server.ts`) — exposes four tools to the supervisor over
-  stdio: `run_dev_task` (start a delegated task and return a `task_id`), `get_task_status`
-  (poll — reflects live `PROGRESS:` updates as the worker streams them), `fetch_task_result`
-  (read the final summary, patch, files changed, cost, and tokens), and `cleanup_task`
-  (tear down a finished task's worktree, branch, and persisted job file).
+- **`cc-delegate` MCP server** (`server/main.py`, official `mcp` Python SDK, run via
+  `uv run`) — exposes four tools to the supervisor over stdio: `run_dev_task` (start a
+  delegated task and return a `task_id`), `get_task_status` (poll — reflects live `PROGRESS:`
+  updates as the worker streams them), `fetch_task_result` (read the final summary, patch,
+  files changed, cost, and tokens), and `cleanup_task` (tear down a finished task's worktree,
+  branch, and persisted job file).
 - **Job persistence** — every job is mirrored to `<repo>/.cc-delegate/jobs/<task_id>.json` on
   each state change, so `get_task_status` / `fetch_task_result` / `cleanup_task` still work
   across MCP-server restarts: the in-memory registry is rebuilt from disk on demand.
 - **Delegate worker** (`worker/worker.py`) — a [deepagents](https://github.com/langchain-ai/deepagents)
-  agent, run as a subprocess via `uv run` (see `src/worker.ts`). Uses `LocalShellBackend` in
+  agent, run as a subprocess via `uv run` (see `server/worker_launcher.py`). Uses `LocalShellBackend` in
   `virtual_mode=True` to keep filesystem/shell access scoped to the disposable git worktree
   (branch `delegate/<task_id>`), `SubAgent`s for implementer/tester/reviewer roles, and
   `RubricMiddleware` to grade completion against `definition_of_done`/`test_command` instead of
@@ -57,26 +58,20 @@ black-box CLI. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the Claude Agent SDK a
 
 ## Install
 
-Installing the plugin itself is one command (below), but three things live outside Claude Code's
-control and won't be set up for you: a model API key, Node.js, and `uv`. None of these are
-guaranteed just because you have Claude Code — the `claude` binary is a self-contained native
-executable that doesn't expose its own Node.js to other processes, and Claude Code doesn't run
-`npm install` or any build step when it installs a plugin. Go through these in order:
+Installing the plugin itself is one command (below), but two things live outside Claude Code's
+control and won't be set up for you: a model API key and `uv`. Neither is guaranteed just
+because you have Claude Code. Go through these in order:
 
 **1. Get a worker API key.** Default target is MiniMax — sign up at
 [platform.minimax.io](https://platform.minimax.io) and generate a key. (Using a different
 provider instead? Skip ahead to [Configuration](#configuration).)
 
-**2. Install Node.js >= 20**, if `node --version` doesn't already show it —
-[nodejs.org](https://nodejs.org). This runs the pre-built `dist/mcp-server.js`; nothing compiles
-on your machine.
+**2. Install [uv](https://docs.astral.sh/uv/getting-started/installation/)**, if `uv --version`
+doesn't already show it. That's the only runtime prerequisite: `uv run` resolves the MCP
+server's and the worker's inline Python dependencies (and Python itself, if needed) on first
+use — no `pip install`, no Node.js, no build step.
 
-**3. Install [uv](https://docs.astral.sh/uv/getting-started/installation/)**, if `uv --version`
-doesn't already show it. It manages the worker's Python environment automatically — no
-`pip install`, `uv run` resolves `worker/worker.py`'s inline dependencies (and Python itself, if
-needed) on first use.
-
-**4. Set `DELEGATE_API_KEY` as a persistent environment variable, then restart Claude Code.**
+**3. Set `DELEGATE_API_KEY` as a persistent environment variable, then restart Claude Code.**
 This is the step most likely to trip you up: `.mcp.json`'s `${DELEGATE_API_KEY}` only reads the
 OS-level environment of the process that launched Claude Code — there's no `.env` file
 auto-loading and no interactive prompt. Setting it in a terminal *after* Claude Code is already
@@ -92,7 +87,7 @@ running does nothing until you restart it from a shell that has the variable.
 export DELEGATE_API_KEY="your-key-here"
 ```
 
-**5. Install the plugin.**
+**4. Install the plugin.**
 
 ```
 /plugin marketplace add EtienneLescot/cc-delegate
@@ -101,25 +96,19 @@ export DELEGATE_API_KEY="your-key-here"
 
 Or locally during development: `claude --plugin-dir .`
 
-**6. Verify.** Run `/mcp` — this is the checkpoint that surfaces a missing Node/`uv`/key before
-you're mid-task. If `uv` isn't on `PATH`, `run_dev_task` also fails fast with a clear, actionable
-error in `get_task_status`/`fetch_task_result` — this is the reliable signal, since it flows
-through the same structured result the supervisor already reads. A `SessionStart` hook
-(`hooks.json`) additionally probes `node --version` and `uv --version` at the start of every
-session as an earlier best-effort check; it's written in exec-form (no shell) so it behaves the
-same on Windows/macOS/Linux, but a hook failure isn't guaranteed to surface as a friendly message
-in the transcript — treat it as a bonus signal, not the primary one.
+**5. Verify.** Run `/mcp` — this is the checkpoint that surfaces a missing `uv`/key before
+you're mid-task. A `SessionStart` hook (`hooks.json`) additionally probes `uv --version` at the
+start of every session as an earlier best-effort check; it's written in exec-form (no shell) so
+it behaves the same on Windows/macOS/Linux, but a hook failure isn't guaranteed to surface as a
+friendly message in the transcript — treat it as a bonus signal, not the primary one.
 
 ### For maintainers
 
-`dist/mcp-server.js` is a single-file esbuild bundle (no runtime `node_modules` needed — verified
-by running it with `node_modules` removed). After changing anything under `src/`, rebuild and
-commit the result before pushing:
+No build step. The server is plain Python (`server/`, stdlib + the `mcp` SDK declared inline in
+`main.py`); the worker is `worker/worker.py`. Run the test suite with:
 
 ```bash
-npm install   # dev-time only: typescript, esbuild, @types/node
-npm run build # tsc --noEmit for type-checking, then esbuild bundles dist/mcp-server.js
-git add dist/mcp-server.js
+uv run python -m unittest discover -s server -p "test_*.py"
 ```
 
 ## Verify

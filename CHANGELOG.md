@@ -3,6 +3,32 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.0
+
+Single-runtime migration: the MCP server is now Python.
+
+### Changed
+
+- **MCP server rewritten in Python** (`server/`, official `mcp` SDK, FastMCP over stdio),
+  replacing the TypeScript/Node implementation. Same four tools, identical response field
+  names, and the same persisted-job JSON format — jobs written by the 0.2.x Node server load
+  unchanged. `.mcp.json` now launches `uv run server/main.py`.
+- **Single prerequisite**: Node.js is no longer required. `uv` resolves both the server's and
+  the worker's inline dependencies (and Python itself) on first use. The committed esbuild
+  bundle, `package.json`, `tsconfig.json`, and the whole npm chain are gone.
+- The `SessionStart` prerequisite hook now probes only `uv --version`.
+
+### Fixed
+
+- **Child-process stdin hygiene**: the worker subprocess and git calls no longer inherit the
+  server's stdin — which is the MCP protocol channel; an inheriting child stole protocol
+  bytes and hung the session. Caught by the first end-to-end run of the Python server.
+
+### Removed
+
+- `src/`, `dist/mcp-server.js`, `tests/` (Node test suite — its cases live on as
+  `server/test_*.py`), `package.json`, `package-lock.json`, `tsconfig.json`.
+
 ## 0.2.0
 
 Python worker maturity + docs overhaul.

@@ -6,9 +6,9 @@
 # ]
 # ///
 """Runs one delegated coding task with deepagents, then prints a single
-JSON result line to stdout. Invoked as a subprocess by the Node MCP server
-(src/worker.ts) — this script owns the agent loop only; git worktree setup,
-diff collection, and job bookkeeping stay in Node (src/jobs.ts).
+JSON result line to stdout. Invoked as a subprocess by the MCP server
+(server/worker_launcher.py) — this script owns the agent loop only; git
+worktree setup, diff collection, and job bookkeeping stay in the server.
 
 During the run the worker also emits one ``PROGRESS:`` line per graph step
 to stdout so the MCP server can refresh its ``get_task_status`` view live.

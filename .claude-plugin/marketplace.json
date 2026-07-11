@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Marketplace hosting the CC Delegate plugin.",
   "plugins": [
-    { "name": "cc-delegate", "source": "./", "version": "0.2.0",
+    { "name": "cc-delegate", "source": "./", "version": "0.3.0",
       "keywords": ["delegation", "mcp", "cost-optimization"] }
   ]
 }

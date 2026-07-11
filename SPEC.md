@@ -47,13 +47,17 @@ Non-objectives:
 - Interactive UI beyond Claude Code itself.
 - Anthropic-subscription piggybacking (explicitly prohibited by Anthropic; not implemented).
 
-## 3. Architecture (current: v0.2.x)
+## 3. Architecture (current: v0.3.x — single runtime)
 
 | Component | Role | Tech |
 |---|---|---|
-| MCP server (`src/`, bundled `dist/mcp-server.js`) | 4 stdio tools; worktree + diff + job registry/persistence | Node ≥ 20, @modelcontextprotocol/sdk (bundle committed; no npm install at install time) |
+| MCP server (`server/main.py`) | 4 stdio tools; worktree + diff + job registry/persistence | Python via `uv run`, official `mcp` SDK (FastMCP); stdlib elsewhere |
 | Worker (`worker/worker.py`) | The agent loop: deepagents + subagents + rubric; PROGRESS/RESULT_JSON stdout contract | Python via `uv run` (PEP-723 inline deps), litellm routing |
 | Skill (`skills/delegate-heavy-dev/`) | Teaches the supervisor when/how to delegate, poll, review | Claude Code packaged skill |
+
+The only user prerequisite is `uv` (which also provisions Python). Subprocess hygiene rule:
+every child the server spawns gets `stdin=DEVNULL` — the server's stdin is the MCP protocol
+channel, and an inheriting child steals protocol bytes (learned from the first e2e run).
 
 Data flow: supervisor → `run_dev_task` → git worktree `delegate/<task_id>` → `uv run
 worker.py` (spawned with the provider key in process env only) → `PROGRESS:` lines stream
@@ -61,9 +65,8 @@ into `get_task_status.progress` → final `RESULT_JSON:` line → diff collected
 `.cc-delegate/patches/<task_id>.diff` → supervisor reviews → user decides merge →
 `cleanup_task`. (Mermaid diagram: README, Architecture section.)
 
-**Target (v0.3.0)**: same shape, single runtime — the MCP server moves to the official `mcp`
-Python SDK under `uv run`; Node, the committed bundle, and the npm chain disappear.
-Brief: docs/specs/001.
+Remaining v0.3.x scope (user-owned model profiles, litellm fallbacks, per-task `.jsonl`
+observability): brief docs/specs/001.
 
 ## 4. Functional requirements
 

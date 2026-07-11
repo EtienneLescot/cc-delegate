@@ -1,7 +1,7 @@
 {
   "name": "cc-delegate",
   "displayName": "CC Delegate",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Delegate heavy dev tasks from an Opus supervisor to an autonomous worker on a cheaper model, via MCP.",
   "author": { "name": "Etienne Lescot" },
   "repository": "https://github.com/EtienneLescot/cc-delegate",

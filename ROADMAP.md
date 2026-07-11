@@ -17,10 +17,10 @@ This file is the what-and-when; [docs/specs/](docs/specs/) hold disposable deleg
 
 See [docs/specs/001-pure-python-migration.md](docs/specs/001-pure-python-migration.md).
 
-- [ ] **Pure-Python migration**: rewrite the MCP server on the official `mcp` Python SDK, run
-      everything through `uv run`. Removes the Node prerequisite, the committed esbuild bundle,
-      and the whole npm chain — one prerequisite (`uv`) instead of two.
-- [ ] **Model profiles, user-owned**: the user defines a named menu of models in config
+- [x] **Pure-Python migration** (released 0.3.0): MCP server on the official `mcp` Python SDK,
+      everything through `uv run`. Node prerequisite, committed esbuild bundle, and npm chain
+      removed — one prerequisite (`uv`) instead of two.
+- [ ] **Model profiles, user-owned** (v0.3.x): the user defines a named menu of models in config
       (`default`, plus whatever they want); `run_dev_task` accepts a profile *name* only.
       The supervisor never selects a non-default profile unless the user asked for it —
       quotas, keys, and model knowledge belong to the user, not the supervisor.
