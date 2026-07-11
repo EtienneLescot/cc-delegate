@@ -1,10 +1,10 @@
 # Roadmap
 
-Decisions and rationale live in [docs/specs/](docs/specs/); this file is the what-and-when.
-Specs are written in delegation-ready form (objective, constraints, definition of done, test
-command) so they can be handed to `run_dev_task` as-is when their time comes.
+Decisions and rationale live in [SPEC.md](SPEC.md) — the single reference specification.
+This file is the what-and-when; [docs/specs/](docs/specs/) hold disposable delegation briefs
+(self-contained work orders for `run_dev_task`); they never override SPEC.md.
 
-## v0.2.0 — reliability & honesty (in flight)
+## v0.2.0 — reliability & honesty (released 2026-07-11)
 
 - [x] Real cost tracking (`cost_usd`, `total_tokens`) via litellm callbacks
 - [x] Shell-env secret filtering (no more `inherit_env=True` leaking keys into agent shell commands)
