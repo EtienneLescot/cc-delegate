@@ -3,11 +3,17 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { Config } from "./config.js";
 import { collectDiff, persistJob, getJob, type Job } from "./jobs.js";
-import { findLastResultLine, stripResultMarker, type WorkerResult } from "./persistence.js";
+import {
+  findLastResultLine,
+  parseProgressLine,
+  progressNote,
+  stripResultMarker,
+  type WorkerResult,
+} from "./persistence.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_SCRIPT = join(__dirname, "..", "worker", "worker.py");
-const PROGRESS_MARKER = "PROGRESS:";
+const RESULT_MARKER = "RESULT_JSON:";
 
 interface RunArgs {
   spec: string;
@@ -54,34 +60,55 @@ async function runStream(cfg: Config, args: RunArgs, job: Job): Promise<string> 
     while ((nlIdx = stdoutRemainder.indexOf("\n")) >= 0) {
       const line = stdoutRemainder.slice(0, nlIdx).replace(/\r$/, "");
       stdoutRemainder = stdoutRemainder.slice(nlIdx + 1);
-      if (line.startsWith("RESULT_JSON:")) resultLine = line;
-      else if (line.startsWith(PROGRESS_MARKER)) {
-        try {
-          const parsed = JSON.parse(line.slice(PROGRESS_MARKER.length));
-          const note = typeof parsed.note === "string"
-            ? parsed.note
-            : (parsed.node ? `${parsed.node}#${parsed.step}` : `step ${parsed.step}`);
-          updateProgress(job, cfg, note).catch(() => {});
-        } catch {
-          // Ignore malformed PROGRESS lines.
-        }
+      // Capture the RESULT_JSON line as it streams past; later writes to
+      // job.progress must not clobber it because we keep overwriting the
+      // same `resultLine` reference until the loop ends.
+      if (line.startsWith(RESULT_MARKER)) {
+        resultLine = line;
+        continue;
+      }
+      // Each PROGRESS line advances job.progress to the latest human-readable
+      // note (falls back to node#step / "step N"). Anything else — agent
+      // verbose output, library chatter — is silently ignored.
+      const progress = parseProgressLine(line);
+      if (progress) {
+        const note = progressNote(progress);
+        updateProgress(job, cfg, note).catch(() => {
+          // Persistence is best-effort; swallow errors so we don't
+          // crash the stdout consumer mid-stream.
+        });
       }
     }
   });
 
   const result = await subprocess;
+
+  // After the process exits there may be one final partial line in the
+  // remainder buffer (the writer never wrote a trailing newline).
   if (stdoutRemainder.length > 0) {
     const tail = stdoutRemainder.replace(/\r$/, "");
-    if (tail.startsWith("RESULT_JSON:")) resultLine = tail;
+    if (tail.startsWith(RESULT_MARKER)) resultLine = tail;
+    else {
+      const progress = parseProgressLine(tail);
+      if (progress) {
+        updateProgress(job, cfg, progressNote(progress)).catch(() => {});
+      }
+    }
+    stdoutRemainder = "";
   }
 
-  // Use the live-captured line if available; otherwise fall back to result.stdout
-  // for subprocesses that buffer (older execa releases).
+  // Use the live-captured line if available; otherwise fall back to
+  // result.stdout for subprocesses that buffer everything until exit
+  // (older execa releases, very fast producers).
   const stdout = result.stdout ?? "";
-  const stdoutAll = (resultLine ? "" : stdout) + (stdoutRemainder ? "\n" + stdoutRemainder : "");
-  const finalResultLine = resultLine ?? findLastResultLine(stdoutAll);
+  const finalResultLine = resultLine ?? findLastResultLine(stdout);
 
-  if (result.signal === "SIGTERM" || result.signal === "SIGABRT" || result.signal === "SIGINT" || job.abort?.signal.aborted) {
+  if (
+    result.signal === "SIGTERM" ||
+    result.signal === "SIGABRT" ||
+    result.signal === "SIGINT" ||
+    job.abort?.signal.aborted
+  ) {
     job.status = "failed";
     job.error = "worker aborted";
     await persistJob(job, cfg);
@@ -98,6 +125,8 @@ async function runStream(cfg: Config, args: RunArgs, job: Job): Promise<string> 
   try {
     const result_json: WorkerResult = JSON.parse(stripResultMarker(finalResultLine));
     job.turns = result_json.turns;
+    // cost_usd / total_tokens may be absent or null on worker.py revisions
+    // that don't (yet) meter them; only copy finite numbers.
     if (typeof result_json.cost_usd === "number" && Number.isFinite(result_json.cost_usd)) {
       job.costUsd = result_json.cost_usd;
     }

@@ -38273,6 +38273,7 @@ import { join as join2, resolve } from "node:path";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 var RESULT_MARKER = "RESULT_JSON:";
+var PROGRESS_MARKER = "PROGRESS:";
 function findLastResultLine(stdout) {
   const lines = stdout.split(/\r?\n/);
   for (let i2 = lines.length - 1; i2 >= 0; i2--) {
@@ -38282,6 +38283,21 @@ function findLastResultLine(stdout) {
 }
 function stripResultMarker(line) {
   return line.startsWith(RESULT_MARKER) ? line.slice(RESULT_MARKER.length) : line;
+}
+function parseProgressLine(line) {
+  if (!line.startsWith(PROGRESS_MARKER)) return null;
+  try {
+    const obj = JSON.parse(line.slice(PROGRESS_MARKER.length));
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    return obj;
+  } catch {
+    return null;
+  }
+}
+function progressNote(parsed) {
+  if (typeof parsed.note === "string" && parsed.note.length > 0) return parsed.note;
+  if (typeof parsed.node === "string" && parsed.node.length > 0) return `${parsed.node}#${parsed.step ?? "?"}`;
+  return `step ${parsed.step ?? "?"}`;
 }
 function jobsDir(repo, workDir) {
   return join(repo, workDir, "jobs");
@@ -38413,7 +38429,7 @@ import { fileURLToPath as fileURLToPath3 } from "node:url";
 import { dirname as dirname2, join as join3 } from "node:path";
 var __dirname = dirname2(fileURLToPath3(import.meta.url));
 var WORKER_SCRIPT = join3(__dirname, "..", "worker", "worker.py");
-var PROGRESS_MARKER = "PROGRESS:";
+var RESULT_MARKER2 = "RESULT_JSON:";
 async function updateProgress(job, cfg2, note) {
   job.progress = note.slice(0, 200);
   await persistJob(job, cfg2);
@@ -38452,26 +38468,33 @@ async function runStream(cfg2, args, job) {
     while ((nlIdx = stdoutRemainder.indexOf("\n")) >= 0) {
       const line = stdoutRemainder.slice(0, nlIdx).replace(/\r$/, "");
       stdoutRemainder = stdoutRemainder.slice(nlIdx + 1);
-      if (line.startsWith("RESULT_JSON:")) resultLine = line;
-      else if (line.startsWith(PROGRESS_MARKER)) {
-        try {
-          const parsed = JSON.parse(line.slice(PROGRESS_MARKER.length));
-          const note = typeof parsed.note === "string" ? parsed.note : parsed.node ? `${parsed.node}#${parsed.step}` : `step ${parsed.step}`;
-          updateProgress(job, cfg2, note).catch(() => {
-          });
-        } catch {
-        }
+      if (line.startsWith(RESULT_MARKER2)) {
+        resultLine = line;
+        continue;
+      }
+      const progress = parseProgressLine(line);
+      if (progress) {
+        const note = progressNote(progress);
+        updateProgress(job, cfg2, note).catch(() => {
+        });
       }
     }
   });
   const result = await subprocess;
   if (stdoutRemainder.length > 0) {
     const tail = stdoutRemainder.replace(/\r$/, "");
-    if (tail.startsWith("RESULT_JSON:")) resultLine = tail;
+    if (tail.startsWith(RESULT_MARKER2)) resultLine = tail;
+    else {
+      const progress = parseProgressLine(tail);
+      if (progress) {
+        updateProgress(job, cfg2, progressNote(progress)).catch(() => {
+        });
+      }
+    }
+    stdoutRemainder = "";
   }
   const stdout = result.stdout ?? "";
-  const stdoutAll = (resultLine ? "" : stdout) + (stdoutRemainder ? "\n" + stdoutRemainder : "");
-  const finalResultLine = resultLine ?? findLastResultLine(stdoutAll);
+  const finalResultLine = resultLine ?? findLastResultLine(stdout);
   if (result.signal === "SIGTERM" || result.signal === "SIGABRT" || result.signal === "SIGINT" || job.abort?.signal.aborted) {
     job.status = "failed";
     job.error = "worker aborted";

@@ -5,11 +5,8 @@ import type { Config } from "./config.js";
 import {
   deletePersistedJob,
   findPersistedJob,
-  jobFilePath,
-  loadJob,
   rememberRepo,
   saveJob,
-  serializeJob,
   type Job,
   type JobStatus,
 } from "./persistence.js";

@@ -32,6 +32,7 @@ export interface WorkerResult {
 }
 
 const RESULT_MARKER = "RESULT_JSON:";
+const PROGRESS_MARKER = "PROGRESS:";
 
 export function findLastResultLine(stdout: string): string | null {
   const lines = stdout.split(/\r?\n/);
@@ -43,6 +44,42 @@ export function findLastResultLine(stdout: string): string | null {
 
 export function stripResultMarker(line: string): string {
   return line.startsWith(RESULT_MARKER) ? line.slice(RESULT_MARKER.length) : line;
+}
+
+/**
+ * Shape of a PROGRESS line payload printed by the Python worker to stdout
+ * during a run. Each field is optional so we tolerate partial updates.
+ */
+export interface ProgressEvent {
+  step?: number;
+  node?: string;
+  note?: string;
+}
+
+/**
+ * Returns the parsed JSON object from a `PROGRESS:...` line, or null if the
+ * line is not a PROGRESS line or its payload is malformed. Always returns
+ * null (never throws) so the consumer can ignore garbage output.
+ */
+export function parseProgressLine(line: string): ProgressEvent | null {
+  if (!line.startsWith(PROGRESS_MARKER)) return null;
+  try {
+    const obj = JSON.parse(line.slice(PROGRESS_MARKER.length));
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    return obj as ProgressEvent;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Picks a human-readable note string out of a parsed PROGRESS payload.
+ * Prefers an explicit `note`; falls back to `node#step` then `step N`.
+ */
+export function progressNote(parsed: ProgressEvent): string {
+  if (typeof parsed.note === "string" && parsed.note.length > 0) return parsed.note;
+  if (typeof parsed.node === "string" && parsed.node.length > 0) return `${parsed.node}#${parsed.step ?? "?"}`;
+  return `step ${parsed.step ?? "?"}`;
 }
 
 function jobsDir(repo: string, workDir: string): string {
