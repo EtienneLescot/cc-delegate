@@ -1,0 +1,12 @@
+{
+  "name": "minimax-delegate",
+  "displayName": "MiniMax Delegate",
+  "version": "0.1.0",
+  "description": "Delegate heavy dev tasks from an Opus supervisor to an autonomous MiniMax worker via MCP.",
+  "author": { "name": "Etienne Lescot" },
+  "repository": "https://github.com/EtienneLescot/cc-minimax-delegate",
+  "license": "MIT",
+  "keywords": ["minimax", "delegation", "mcp", "agent-sdk", "cost-optimization"],
+  "skills": "./skills",
+  "mcpServers": "./.mcp.json"
+}

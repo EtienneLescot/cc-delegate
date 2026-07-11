@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "minimax-delegate": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.js"],
+      "env": {
+        "MINIMAX_API_KEY": "${MINIMAX_API_KEY}",
+        "MINIMAX_BASE_URL": "https://api.minimax.io/anthropic",
+        "MINIMAX_MODEL": "MiniMax-M3[1m]"
+      }
+    }
+  }
+}

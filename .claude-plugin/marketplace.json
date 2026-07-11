@@ -1,0 +1,10 @@
+{
+  "name": "cc-minimax-marketplace",
+  "owner": { "name": "Etienne Lescot" },
+  "version": "1.0.0",
+  "description": "Marketplace hosting the MiniMax Delegate plugin.",
+  "plugins": [
+    { "name": "minimax-delegate", "source": "./", "version": "0.1.0",
+      "keywords": ["minimax", "delegation", "mcp"] }
+  ]
+}

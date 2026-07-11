@@ -1,0 +1,21 @@
+{
+  "name": "cc-minimax-delegate",
+  "version": "0.1.0",
+  "description": "Delegate heavy dev tasks from Claude Code (Opus supervisor) to an autonomous MiniMax worker via MCP.",
+  "type": "module",
+  "bin": { "minimax-delegate-mcp": "dist/mcp-server.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/mcp-server.js",
+    "dev": "tsc -w -p tsconfig.json"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "execa": "^9.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": { "typescript": "^5.5.0", "@types/node": "^20.0.0" },
+  "license": "MIT"
+}
