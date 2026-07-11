@@ -1,7 +1,12 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { execa } from "execa";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import type { Config } from "./config.js";
-import { workerAgents } from "./subagents.js";
 import { getJob, collectDiff } from "./jobs.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const WORKER_SCRIPT = join(__dirname, "..", "worker", "worker.py");
+const RESULT_MARKER = "RESULT_JSON:";
 
 interface RunArgs {
   spec: string;
@@ -9,89 +14,57 @@ interface RunArgs {
   taskId: string;
   testCommand?: string;
   definitionOfDone?: string;
-  maxTurns: number;
-  maxBudgetUsd: number;
+  recursionLimit: number;
+  rubricMaxIterations: number;
 }
 
-function delegateEnv(cfg: Config): Record<string, string> {
-  return {
-    ...process.env,
-    ANTHROPIC_API_KEY: "",
-    ANTHROPIC_BASE_URL: cfg.baseUrl,
-    ANTHROPIC_AUTH_TOKEN: cfg.workerApiKey,
-    ANTHROPIC_MODEL: cfg.model,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: cfg.model,
-    ANTHROPIC_DEFAULT_OPUS_MODEL: cfg.model,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: cfg.model,
-    API_TIMEOUT_MS: String(cfg.apiTimeoutMs),
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-  } as Record<string, string>;
+interface WorkerResult {
+  status: "succeeded" | "failed";
+  summary: string | null;
+  turns: number;
+  error: string | null;
+  rubric_status: string | null;
 }
 
-function buildPrompt(a: RunArgs): string {
-  return [
-    `# Task`, a.spec,
-    a.definitionOfDone ? `\n# Definition of done\n${a.definitionOfDone}` : "",
-    a.testCommand ? `\n# Test command\nRun \`${a.testCommand}\` and iterate until it passes.` : "",
-    `\n# Rules`,
-    `- Work only inside the current working directory.`,
-    `- Never run git push, merge, rebase onto other branches, or destructive commands.`,
-    `- Use the implementer/tester/reviewer subagents when helpful.`,
-    `- When done, print a short summary of what changed and the final test status.`,
-  ].filter(Boolean).join("\n");
-}
-
-/** Lance le worker délégué en tâche de fond et met à jour le job. */
+/** Lance le worker délégué (deepagents, en sous-processus Python) et met à jour le job. */
 export async function runWorker(cfg: Config, args: RunArgs): Promise<void> {
   const job = getJob(args.taskId)!;
   try {
-    const q = query({
-      prompt: buildPrompt(args),
-      options: {
-        cwd: args.worktree,
-        env: delegateEnv(cfg),
-        model: cfg.model,
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
-        allowedTools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent"],
-        agents: workerAgents,
-        maxTurns: args.maxTurns,
-        maxBudgetUsd: args.maxBudgetUsd,
-        settingSources: ["project"],
-        strictMcpConfig: true,
-        systemPrompt: {
-          type: "preset",
-          preset: "claude_code",
-          append:
-            "You are an autonomous coding worker delegated by a supervisor. " +
-            "Deliver a complete, tested change. Stop at the patch; the supervisor reviews and merges.",
-        },
-        abortController: job.abort,
-      },
+    const cliArgs = [
+      "run", WORKER_SCRIPT,
+      "--worktree", args.worktree,
+      "--spec", args.spec,
+      "--model", cfg.model,
+      "--api-key-env-var", cfg.apiKeyEnvVar,
+      "--recursion-limit", String(args.recursionLimit),
+      "--rubric-max-iterations", String(args.rubricMaxIterations),
+    ];
+    if (args.definitionOfDone) cliArgs.push("--definition-of-done", args.definitionOfDone);
+    if (args.testCommand) cliArgs.push("--test-command", args.testCommand);
+
+    const { stdout } = await execa("uv", cliArgs, {
+      env: { ...process.env, DELEGATE_API_KEY: cfg.workerApiKey },
+      cancelSignal: job.abort.signal,
+      reject: false,
     });
 
-    for await (const msg of q) {
-      if (msg.type === "assistant") {
-        const block = (msg.message?.content as any[] | undefined)?.find?.((b: any) => b.type === "text");
-        const text = block?.text;
-        if (text) job.progress = String(text).slice(0, 300);
-      } else if (msg.type === "result") {
-        job.turns = msg.num_turns ?? job.turns;
-        job.costUsd = msg.total_cost_usd ?? job.costUsd;
-        if (msg.subtype === "success") {
-          job.summary = msg.result;
-        } else {
-          job.status = "failed";
-          job.error = `${msg.subtype}: ${(msg as any).errors?.join?.("; ") ?? "run ended without success"}`;
-        }
+    const line = stdout.split("\n").reverse().find((l) => l.startsWith(RESULT_MARKER));
+    if (!line) {
+      job.status = "failed";
+      job.error = "worker produced no result line; last stdout: " + stdout.slice(-500);
+    } else {
+      const result: WorkerResult = JSON.parse(line.slice(RESULT_MARKER.length));
+      job.turns = result.turns;
+      job.summary = result.summary ?? undefined;
+      if (result.status === "succeeded") {
+        const { patchPath, filesChanged } = await collectDiff(cfg, job.repo, job.worktree, job.taskId);
+        job.patchPath = patchPath;
+        job.filesChanged = filesChanged;
+        job.status = "succeeded";
+      } else {
+        job.status = "failed";
+        job.error = result.error ?? "worker reported failure";
       }
-    }
-
-    if (job.status !== "failed") {
-      const { patchPath, filesChanged } = await collectDiff(cfg, job.repo, job.worktree, job.taskId);
-      job.patchPath = patchPath;
-      job.filesChanged = filesChanged;
-      job.status = "succeeded";
     }
   } catch (err: any) {
     job.status = "failed";

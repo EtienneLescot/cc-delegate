@@ -10,7 +10,8 @@ export interface Job {
   status: JobStatus;
   progress?: string;
   turns: number;
-  costUsd: number;
+  // deepagents/LangGraph has no built-in cost meter; stays null until we wire one up.
+  costUsd: number | null;
   error?: string;
   summary?: string;
   patchPath?: string;

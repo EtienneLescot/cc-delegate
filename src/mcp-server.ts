@@ -22,8 +22,8 @@ server.registerTool(
       test_command: z.string().optional(),
       definition_of_done: z.string().optional(),
       base_branch: z.string().optional(),
-      max_turns: z.number().optional(),
-      max_budget_usd: z.number().optional(),
+      recursion_limit: z.number().optional()
+        .describe("LangGraph step budget (every model + tool call counts), not a turn count"),
       timeout_ms: z.number().optional(),
     },
   },
@@ -32,15 +32,15 @@ server.registerTool(
     const abort = new AbortController();
     const timeout = a.timeout_ms ?? cfg.defaultTimeoutMs;
     const timer = setTimeout(() => abort.abort(), timeout);
-    const job: Job = { taskId, status: "running", turns: 0, costUsd: 0, branch, worktree, repo, abort };
+    const job: Job = { taskId, status: "running", turns: 0, costUsd: null, branch, worktree, repo, abort };
     putJob(job);
 
     // Fire-and-forget : le worker tourne en fond, le job est mis à jour au fil de l'eau.
     runWorker(cfg, {
       spec: a.spec, worktree, taskId,
       testCommand: a.test_command, definitionOfDone: a.definition_of_done,
-      maxTurns: a.max_turns ?? cfg.defaultMaxTurns,
-      maxBudgetUsd: a.max_budget_usd ?? cfg.defaultMaxBudgetUsd,
+      recursionLimit: a.recursion_limit ?? cfg.defaultRecursionLimit,
+      rubricMaxIterations: cfg.defaultRubricMaxIterations,
     }).finally(() => clearTimeout(timer));
 
     return {

@@ -2,7 +2,18 @@
 
 ## Worker auth against a custom `ANTHROPIC_BASE_URL` fails headlessly despite a valid key
 
-**Status:** blocked, not yet resolved. Blocks the `run_dev_task` smoke test (spec §11).
+**Status:** superseded, not fixed. The worker no longer uses `@anthropic-ai/claude-agent-sdk` —
+it now calls the [deepagents](https://github.com/langchain-ai/deepagents) library directly
+(`worker/worker.py`), which sidesteps this entirely (no Claude Code CLI, no OAuth/login gate,
+plain `litellm` API-key auth that works on the first try). Kept below for the record and in case
+a future need for the Claude Agent SDK specifically resurfaces.
+
+We also tried shelling out to CLI coding agents (OpenCode, then `dcode`/deepagents-code) before
+landing on calling `deepagents` as a library — `dcode` in particular hung indefinitely in
+non-interactive mode on this machine, most likely because its `rich`-based terminal UI doesn't
+degrade gracefully without a real TTY (confirmed separately: `dcode doctor` crashes outright on
+Windows' legacy console renderer). Calling the library directly avoids that whole class of
+problem — no subprocess, no TTY, no CLI-specific auth precedence rules to fight.
 
 ### Environment
 

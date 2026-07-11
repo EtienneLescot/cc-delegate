@@ -11,17 +11,22 @@ description: >-
 # Delegate heavy development to the worker model
 
 You are the supervisor. Keep planning and review on your current (Anthropic) model. Delegate the
-heavy execution to the worker exposed by the `cc-delegate` MCP server — whatever model
-`DELEGATE_MODEL` points to (MiniMax by default, but any Anthropic-compatible endpoint works).
+heavy execution to the worker exposed by the `cc-delegate` MCP server — a deepagents-powered
+worker on whatever model `DELEGATE_MODEL` points to (MiniMax by default, but any litellm-routed
+provider works).
 
 ## Workflow
 
 1. **Write a crisp spec.** Turn the user's request into: objective, constraints, a clear
-   `definition_of_done`, and the `test_command` to validate.
+   `definition_of_done`, and the `test_command` to validate. These two fields double as the
+   worker's rubric — the more precise they are, the more reliably the worker recognizes when
+   it's actually done instead of stopping early or over-iterating.
 2. **Delegate.** Call `run_dev_task` with `spec`, the absolute `repo_path`, `test_command`,
-   `definition_of_done`, and (optionally) `max_budget_usd`. It returns a `task_id`.
-3. **Supervise.** Poll `get_task_status(task_id)` periodically. Report progress and cost to the user.
-   If the run fails on budget/turns, refine the spec and delegate again.
+   `definition_of_done`, and (optionally) `recursion_limit` for unusually large tasks. It returns
+   a `task_id`.
+3. **Supervise.** Poll `get_task_status(task_id)` periodically. Report progress to the user
+   (cost isn't tracked yet — `cost_usd` reads `null`). If the run fails to converge, refine the
+   spec and delegate again.
 4. **Review.** When status is `succeeded`, call `fetch_task_result(task_id)`. Read the `summary`,
    open the `patch_path` diff, and check `files_changed` and `tests`.
 5. **Decide.** Present the diff to the user. You (with the user) decide whether to merge branch
