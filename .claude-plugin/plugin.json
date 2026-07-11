@@ -8,5 +8,6 @@
   "license": "MIT",
   "keywords": ["delegation", "mcp", "agent-sdk", "cost-optimization", "minimax"],
   "skills": "./skills",
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks.json"
 }

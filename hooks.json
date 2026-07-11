@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["--version"]
+          },
+          {
+            "type": "command",
+            "command": "uv",
+            "args": ["--version"]
+          }
+        ]
+      }
+    ]
+  }
+}

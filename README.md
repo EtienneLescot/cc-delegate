@@ -28,32 +28,58 @@ black-box CLI. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the Claude Agent SDK a
 
 ## Install
 
-Requires **Node >= 20** (to run the pre-built `dist/mcp-server.js` — nothing to compile) and
-[**uv**](https://docs.astral.sh/uv/getting-started/installation/) (manages the worker's Python
-environment automatically — no separate `pip install` needed, `uv run` resolves
-`worker/worker.py`'s inline dependencies on first use). Claude Code doesn't run `npm install` or
-any build step when installing a plugin, so `dist/mcp-server.js` is committed pre-bundled —
-cloning/installing this repo is enough on its own.
+Installing the plugin itself is one command (below), but three things live outside Claude Code's
+control and won't be set up for you: a model API key, Node.js, and `uv`. None of these are
+guaranteed just because you have Claude Code — the `claude` binary is a self-contained native
+executable that doesn't expose its own Node.js to other processes, and Claude Code doesn't run
+`npm install` or any build step when it installs a plugin. Go through these in order:
 
-```bash
-export DELEGATE_API_KEY=...
+**1. Get a worker API key.** Default target is MiniMax — sign up at
+[platform.minimax.io](https://platform.minimax.io) and generate a key. (Using a different
+provider instead? Skip ahead to [Configuration](#configuration).)
+
+**2. Install Node.js >= 20**, if `node --version` doesn't already show it —
+[nodejs.org](https://nodejs.org). This runs the pre-built `dist/mcp-server.js`; nothing compiles
+on your machine.
+
+**3. Install [uv](https://docs.astral.sh/uv/getting-started/installation/)**, if `uv --version`
+doesn't already show it. It manages the worker's Python environment automatically — no
+`pip install`, `uv run` resolves `worker/worker.py`'s inline dependencies (and Python itself, if
+needed) on first use.
+
+**4. Set `DELEGATE_API_KEY` as a persistent environment variable, then restart Claude Code.**
+This is the step most likely to trip you up: `.mcp.json`'s `${DELEGATE_API_KEY}` only reads the
+OS-level environment of the process that launched Claude Code — there's no `.env` file
+auto-loading and no interactive prompt. Setting it in a terminal *after* Claude Code is already
+running does nothing until you restart it from a shell that has the variable.
+
+```powershell
+# Windows (PowerShell) — persists across terminals, requires restarting Claude Code after
+[Environment]::SetEnvironmentVariable("DELEGATE_API_KEY", "your-key-here", "User")
 ```
 
-Load the plugin locally:
-
 ```bash
-claude --plugin-dir .
+# macOS/Linux — add to ~/.zshrc or ~/.bashrc, then open a new shell
+export DELEGATE_API_KEY="your-key-here"
 ```
 
-Or install from a marketplace:
+**5. Install the plugin.**
 
-```bash
+```
 /plugin marketplace add EtienneLescot/cc-delegate
 /plugin install cc-delegate@cc-delegate-marketplace
 ```
 
-If `uv` isn't on `PATH`, `run_dev_task` fails fast with a clear error in `get_task_status`/
-`fetch_task_result` (rather than a silent MCP connection failure) telling you to install it.
+Or locally during development: `claude --plugin-dir .`
+
+**6. Verify.** Run `/mcp` — this is the checkpoint that surfaces a missing Node/`uv`/key before
+you're mid-task. If `uv` isn't on `PATH`, `run_dev_task` also fails fast with a clear, actionable
+error in `get_task_status`/`fetch_task_result` — this is the reliable signal, since it flows
+through the same structured result the supervisor already reads. A `SessionStart` hook
+(`hooks.json`) additionally probes `node --version` and `uv --version` at the start of every
+session as an earlier best-effort check; it's written in exec-form (no shell) so it behaves the
+same on Windows/macOS/Linux, but a hook failure isn't guaranteed to surface as a friendly message
+in the transcript — treat it as a bonus signal, not the primary one.
 
 ### For maintainers
 
