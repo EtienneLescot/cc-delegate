@@ -31,7 +31,7 @@ export const putJob = (job: Job) => void jobs.set(job.taskId, job);
 export async function createWorktree(cfg: Config, repoPath: string, baseBranch?: string) {
   const repo = resolve(repoPath);
   const taskId = `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  const branch = `mm/${taskId}`;
+  const branch = `delegate/${taskId}`;
   const wtRoot = join(repo, cfg.workDir, "worktrees");
   await mkdir(wtRoot, { recursive: true });
   const worktree = join(wtRoot, taskId);

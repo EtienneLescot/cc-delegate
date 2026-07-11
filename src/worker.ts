@@ -13,12 +13,12 @@ interface RunArgs {
   maxBudgetUsd: number;
 }
 
-function minimaxEnv(cfg: Config): Record<string, string> {
+function delegateEnv(cfg: Config): Record<string, string> {
   return {
     ...process.env,
     ANTHROPIC_API_KEY: "",
     ANTHROPIC_BASE_URL: cfg.baseUrl,
-    ANTHROPIC_AUTH_TOKEN: cfg.minimaxApiKey,
+    ANTHROPIC_AUTH_TOKEN: cfg.workerApiKey,
     ANTHROPIC_MODEL: cfg.model,
     ANTHROPIC_DEFAULT_SONNET_MODEL: cfg.model,
     ANTHROPIC_DEFAULT_OPUS_MODEL: cfg.model,
@@ -41,7 +41,7 @@ function buildPrompt(a: RunArgs): string {
   ].filter(Boolean).join("\n");
 }
 
-/** Lance le worker MiniMax en tâche de fond et met à jour le job. */
+/** Lance le worker délégué en tâche de fond et met à jour le job. */
 export async function runWorker(cfg: Config, args: RunArgs): Promise<void> {
   const job = getJob(args.taskId)!;
   try {
@@ -49,7 +49,7 @@ export async function runWorker(cfg: Config, args: RunArgs): Promise<void> {
       prompt: buildPrompt(args),
       options: {
         cwd: args.worktree,
-        env: minimaxEnv(cfg),
+        env: delegateEnv(cfg),
         model: cfg.model,
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,

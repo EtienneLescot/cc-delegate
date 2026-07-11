@@ -1,6 +1,6 @@
 import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
 
-// model omis => hérite de l'endpoint MiniMax du worker.
+// model omis => hérite de l'endpoint délégué (DELEGATE_*) du worker.
 export const workerAgents: Record<string, AgentDefinition> = {
   implementer: {
     description: "Writes and edits source code to satisfy the spec. Use for implementation work.",

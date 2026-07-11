@@ -1,5 +1,6 @@
 This project depends on @anthropic-ai/claude-agent-sdk, which is distributed under Anthropic's
 proprietary license and governed by Anthropic's Commercial Terms of Service. Using the Agent SDK /
-Claude Code engine with a non-Anthropic model via an Anthropic-compatible endpoint is the pattern
-documented by MiniMax for Claude Code. This repository's own source code is MIT-licensed.
-Review Anthropic's and MiniMax's terms before production use.
+Claude Code engine with a non-Anthropic model via an Anthropic-compatible endpoint is a pattern
+documented by several providers (MiniMax among them) for Claude Code. This repository's own
+source code is MIT-licensed. Review Anthropic's terms and your chosen worker provider's terms
+before production use.

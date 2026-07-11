@@ -7,15 +7,15 @@ import { createWorktree, getJob, putJob, type Job } from "./jobs.js";
 import { runWorker } from "./worker.js";
 
 const cfg = loadConfig();
-const server = new McpServer({ name: "minimax-delegate", version: "0.1.0" });
+const server = new McpServer({ name: "cc-delegate", version: "0.1.0" });
 
 server.registerTool(
   "run_dev_task",
   {
-    title: "Delegate a heavy dev task to the MiniMax worker",
+    title: "Delegate a heavy dev task to the worker model",
     description:
-      "Starts an autonomous MiniMax-powered coding worker on an isolated git worktree. " +
-      "Returns a task_id immediately; poll with get_task_status, then fetch_task_result.",
+      "Starts an autonomous coding worker (on whatever model DELEGATE_MODEL points to) on an isolated " +
+      "git worktree. Returns a task_id immediately; poll with get_task_status, then fetch_task_result.",
     inputSchema: {
       spec: z.string().describe("Objective and constraints in natural language"),
       repo_path: z.string().describe("Absolute path to the target git repository"),
