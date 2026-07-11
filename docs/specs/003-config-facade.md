@@ -48,11 +48,17 @@ error listing available profiles; absent → default).
 ### Secret-entry paths, in order of preference
 
 1. **OAuth device flow** — no secret in the conversation at all (the whole point).
-2. **MCP elicitation** — investigate: FastMCP's `ctx.elicit` lets the server request input
-   through the client UI without transiting the model. If Claude Code supports elicitation
-   for text input, use it for API keys and drop path 3.
-3. **Key as tool parameter** — allowed but explicit: the tool warns that the key entered the
-   conversation context and recommends rotating via path 1/2 later.
+2. **MCP elicitation** — CONFIRMED (2026-07-11): Claude Code >= 2.1.199 handles elicitation
+   from stdio servers, and per its docs the user's response goes straight back to the server
+   **without entering the model's conversation context** (the `ElicitationResult` hook fires
+   between user response and server delivery — the model is not in the loop). This is the
+   primary path for API keys: `store_api_key(profile)` elicits the key via the client dialog.
+   To verify during implementation: FastMCP `ctx.elicit` interop specifically (not explicitly
+   documented by Claude Code) and whether the dialog masks the input; degrade to path 3 on
+   clients that don't support elicitation.
+3. **Fallback for non-elicitation clients** — the tool returns the exact env var name /
+   credentials-file location for manual placement; accepting the key as a tool parameter is
+   last resort and warns that the value transited the conversation.
 
 ### Skill rule (user sovereignty, extended)
 
