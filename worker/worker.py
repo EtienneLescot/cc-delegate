@@ -9,6 +9,9 @@
 JSON result line to stdout. Invoked as a subprocess by the Node MCP server
 (src/worker.ts) — this script owns the agent loop only; git worktree setup,
 diff collection, and job bookkeeping stay in Node (src/jobs.ts).
+
+During the run the worker also emits one ``PROGRESS:`` line per graph step
+to stdout so the MCP server can refresh its ``get_task_status`` view live.
 """
 
 import argparse
@@ -16,10 +19,109 @@ import json
 import os
 import sys
 
+import litellm
+
 from deepagents import RubricMiddleware, SubAgent, create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
 
 RESULT_MARKER = "RESULT_JSON:"
+PROGRESS_MARKER = "PROGRESS:"
+
+# Substrings (case-insensitive) that mark an env var as a secret. Matched
+# against the uppercased name with ``in`` — so ``MY_API_KEY``,
+# ``GITHUB_TOKEN``, ``DB_PASSWORD`` are all filtered. ``is_sensitive_env_name``
+# is a pure function so it stays unit-testable without touching ``os.environ``.
+_SENSITIVE_ENV_SUBSTRINGS: tuple[str, ...] = (
+    "API_KEY",
+    "APIKEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "CREDENTIAL",
+)
+
+
+def is_sensitive_env_name(name: str) -> bool:
+    """Return True if ``name`` looks like a secret-bearing environment variable.
+
+    The check is intentionally broad: any substring hit (case-insensitive) on
+    API_KEY / APIKEY / TOKEN / SECRET / PASSWORD / CREDENTIAL qualifies. We
+    err on the side of dropping more variables rather than risking a leak
+    through a shell command the agent runs. PATH / HOME / SystemRoot / TEMP
+    are unaffected.
+    """
+    upper = name.upper()
+    return any(token in upper for token in _SENSITIVE_ENV_SUBSTRINGS)
+
+
+def build_shell_env(api_key_env_var: str) -> dict[str, str]:
+    """Return a copy of ``os.environ`` safe to hand to ``LocalShellBackend``.
+
+    Drops anything that matches ``is_sensitive_env_name``, plus the well-known
+    secret names ``DELEGATE_API_KEY`` and the provider-specific key env var
+    named by ``api_key_env_var``. PATH, HOME, SystemRoot, TEMP, and similar
+    survive so that ``git``, ``node``, ``npm``, etc. keep working inside the
+    worktree.
+
+    IMPORTANT: this only filters the dict we hand to the shell backend — the
+    Python process's own ``os.environ`` keeps the provider key, because
+    litellm reads it from there.
+    """
+    drop_names = {"DELEGATE_API_KEY", api_key_env_var}
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k not in drop_names and not is_sensitive_env_name(k)
+    }
+
+
+class CostTracker:
+    """litellm success callback that accumulates cost + tokens across every
+    model call in the run (main agent, subagents, rubric grader).
+
+    Per-call failures degrade silently: a model without a known price simply
+    contributes nothing to ``cost_usd`` but does not crash the agent loop.
+    """
+
+    def __init__(self) -> None:
+        self.cost_usd: float = 0.0
+        self.total_tokens: int = 0
+        self._priced_calls: int = 0
+
+    def __call__(self, kwargs, completion_response, start_time, end_time) -> None:  # noqa: ARG002
+        # Per-call cost lookup — wrapped because unknown model pricing raises
+        # in litellm; a metering failure must never crash the agent.
+        try:
+            cost = litellm.completion_cost(completion_response=completion_response)
+            if cost is not None and isinstance(cost, (int, float)) and float(cost) >= 0:
+                self.cost_usd += float(cost)
+                self._priced_calls += 1
+        except Exception:
+            # Unknown model / missing pricing entry — skip silently.
+            pass
+
+        # Token accumulation — try the attribute, then the dict, then give up.
+        try:
+            usage = getattr(completion_response, "usage", None)
+            if usage is None and isinstance(completion_response, dict):
+                usage = completion_response.get("usage")
+            total: object | None = None
+            if usage is not None:
+                if hasattr(usage, "total_tokens"):
+                    total = usage.total_tokens
+                elif isinstance(usage, dict):
+                    total = usage.get("total_tokens")
+            if isinstance(total, (int, float)):
+                self.total_tokens += int(total)
+        except Exception:
+            pass
+
+    def final_cost_usd(self) -> float | None:
+        """Return the accumulated cost, or ``None`` if no call could be priced."""
+        if self._priced_calls == 0:
+            return None
+        return self.cost_usd
+
 
 SUBAGENTS: list[SubAgent] = [
     {
@@ -68,6 +170,43 @@ def build_prompt(spec: str, definition_of_done: str | None, test_command: str | 
     return "\n".join(parts)
 
 
+def _message_content(message) -> object | None:
+    """Best-effort extraction of a message's textual content."""
+    content = getattr(message, "content", None)
+    if content is None and isinstance(message, dict):
+        content = message.get("content")
+    return content
+
+
+def _short_note_from_message(message) -> str | None:
+    """Return a short human-readable snippet (≤200 chars) from ``message``.
+
+    Returns ``None`` if the message carries no usable text — caller should
+    then omit the ``note`` field from the progress payload.
+    """
+    content = _message_content(message)
+    if isinstance(content, str) and content:
+        return content[:200]
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        text = " ".join(parts).strip()
+        return text[:200] if text else None
+    return None
+
+
+def _last_message_content(messages: list) -> object | None:
+    if not messages:
+        return None
+    return _message_content(messages[-1])
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--worktree", required=True)
@@ -87,12 +226,26 @@ def main() -> int:
         return 1
     os.environ[args.api_key_env_var] = api_key
 
-    # inherit_env=True: the worker needs the host PATH to find node/npm/git/etc.
-    # for the target repo's own tooling. Safe here because access is already
-    # scoped to a disposable git worktree (virtual_mode=True) on its own branch.
-    backend = LocalShellBackend(root_dir=args.worktree, virtual_mode=True, timeout=120, inherit_env=True)
+    # Filter the env before handing it to LocalShellBackend so the agent can't
+    # echo host secrets (DELEGATE_API_KEY, the provider key, GITHUB_TOKEN, ...)
+    # back through a shell command. PATH / HOME / SystemRoot / TEMP survive so
+    # node/npm/git still work. The Python process's own os.environ keeps the
+    # provider key — litellm reads it from there.
+    backend = LocalShellBackend(
+        root_dir=args.worktree,
+        virtual_mode=True,
+        timeout=120,
+        inherit_env=False,
+        env=build_shell_env(args.api_key_env_var),
+    )
 
-    # _rubric_status is a PrivateStateAttr, omitted from invoke()'s return value
+    # Register a litellm success callback to meter cost + tokens across every
+    # model call in the run (main agent, subagents, rubric grader). Registered
+    # BEFORE create_deep_agent so the first model call is metered too.
+    tracker = CostTracker()
+    litellm.success_callback = [tracker]
+
+    # _rubric_status is a PrivateStateAttr, omitted from stream()'s final state
     # by design; on_evaluation is the documented way to observe the grader's
     # verdict without a checkpointer.
     rubric_evaluations: list[dict] = []
@@ -115,12 +268,50 @@ def main() -> int:
     if rubric:
         invoke_state["rubric"] = rubric
 
-    result = {"status": "failed", "summary": None, "turns": 0, "error": None, "rubric_status": None}
+    result = {
+        "status": "failed",
+        "summary": None,
+        "turns": 0,
+        "error": None,
+        "rubric_status": None,
+        "cost_usd": None,
+        "total_tokens": None,
+    }
     try:
-        state = agent.invoke(invoke_state, config={"recursion_limit": args.recursion_limit})
-        messages = state.get("messages", [])
+        # Live progress: stream updates one node at a time, print a flushed
+        # PROGRESS line per step, and accumulate the longest messages list we
+        # see so we can reconstruct the final state for RESULT_JSON. The
+        # "last relevant update" for the message history is whichever agent
+        # node emitted the full message list — we keep the longest one seen.
+        step_counter = 0
+        accumulated_messages: list = []
+        for update in agent.stream(
+            invoke_state,
+            config={"recursion_limit": args.recursion_limit},
+            stream_mode="updates",
+        ):
+            for node_name, node_state in update.items():
+                step_counter += 1
+                messages_delta: list | None = None
+                if isinstance(node_state, dict):
+                    delta = node_state.get("messages")
+                    if isinstance(delta, list):
+                        messages_delta = delta
+                if messages_delta is not None and len(messages_delta) > len(accumulated_messages):
+                    accumulated_messages = messages_delta
+
+                note = None
+                source_for_note = messages_delta if messages_delta else accumulated_messages
+                if source_for_note:
+                    note = _short_note_from_message(source_for_note[-1])
+                payload: dict[str, object] = {"step": step_counter, "node": node_name}
+                if note:
+                    payload["note"] = note
+                print(PROGRESS_MARKER + json.dumps(payload), flush=True)
+
+        messages = accumulated_messages
         result["turns"] = len(messages)
-        result["summary"] = messages[-1].content if messages else None
+        result["summary"] = _last_message_content(messages)
         result["rubric_status"] = rubric_evaluations[-1]["result"] if rubric_evaluations else None
         if rubric:
             result["status"] = "succeeded" if result["rubric_status"] == "satisfied" else "failed"
@@ -130,6 +321,11 @@ def main() -> int:
             result["status"] = "succeeded"
     except Exception as e:  # noqa: BLE001 - surface any failure to the supervisor as a structured result
         result["error"] = f"{type(e).__name__}: {e}"
+
+    # Metering is recorded regardless of success/failure so the supervisor
+    # can still report partial spend on crashed runs.
+    result["cost_usd"] = tracker.final_cost_usd()
+    result["total_tokens"] = tracker.total_tokens if tracker.total_tokens > 0 else None
 
     print(RESULT_MARKER + json.dumps(result))
     return 0 if result["status"] == "succeeded" else 1

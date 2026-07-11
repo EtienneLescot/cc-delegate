@@ -1,6 +1,6 @@
 {
   "name": "cc-delegate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Delegate heavy dev tasks from Claude Code (Opus supervisor) to an autonomous worker on a cheaper model, via MCP.",
   "type": "module",
   "bin": {
@@ -9,7 +9,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "bundle": "esbuild src/mcp-server.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/mcp-server.js --external:node:* --banner:js=\"import{createRequire as __cr}from 'node:module';const require=__cr(import.meta.url);\"",
-    "build": "npm run typecheck && npm run bundle",
+    "build:test-helpers": "esbuild src/persistence.ts --bundle --platform=node --format=esm --target=node20 --outfile=tests/build/persistence.js --external:node:*",
+    "build": "npm run typecheck && npm run bundle && npm run build:test-helpers",
+    "test": "npm run build:test-helpers && node --test \"tests/*.test.mjs\"",
     "start": "node dist/mcp-server.js",
     "dev": "tsc -w -p tsconfig.json --noEmit"
   },

@@ -8,14 +8,43 @@ The supervisor stays on Anthropic; only the worker is billed on the alternate pr
 
 ## Architecture
 
-- **`cc-delegate` MCP server** (`src/mcp-server.ts`) — exposes `run_dev_task`,
-  `get_task_status`, `fetch_task_result` to the supervisor over stdio.
+```mermaid
+flowchart LR
+  Supervisor["Claude Code supervisor<br/>(Anthropic API)"]
+  MCP["cc-delegate MCP server<br/>Node, stdio<br/>4 tools: run_dev_task,<br/>get_task_status, fetch_task_result,<br/>cleanup_task"]
+  Worktree["Disposable git worktree<br/>branch delegate/&lt;task_id&gt;"]
+  Worker["uv run worker/worker.py<br/>deepagents loop<br/>+ implementer / tester / reviewer subagents<br/>+ rubric grader"]
+  Provider["Provider<br/>(litellm-routed,<br/>e.g. MiniMax M3)"]
+  Review["Supervisor review<br/>of patch / diff"]
+
+  Supervisor -->|"run_dev_task /<br/>get_task_status /<br/>fetch_task_result /<br/>cleanup_task"| MCP
+  MCP -->|"createWorktree()"| Worktree
+  MCP -->|"uv run worker.py"| Worker
+  Worker -->|"litellm completion"| Provider
+  Provider -->|"model response"| Worker
+  Worker -->|"PROGRESS: {step, node, ...}<br/>(live, flushed per step)<br/>RESULT_JSON: {status, summary,<br/>turns, cost_usd, total_tokens,<br/>rubric_status, error}"| MCP
+  MCP -->|"latest progress<br/>(get_task_status)"| Supervisor
+  Worktree -->|"git diff --cached"| MCP
+  MCP -->|"patch + diff"| Review
+```
+
+- **`cc-delegate` MCP server** (`src/mcp-server.ts`) — exposes four tools to the supervisor over
+  stdio: `run_dev_task` (start a delegated task and return a `task_id`), `get_task_status`
+  (poll — reflects live `PROGRESS:` updates as the worker streams them), `fetch_task_result`
+  (read the final summary, patch, files changed, cost, and tokens), and `cleanup_task`
+  (tear down a finished task's worktree, branch, and persisted job file).
+- **Job persistence** — every job is mirrored to `<repo>/.cc-delegate/jobs/<task_id>.json` on
+  each state change, so `get_task_status` / `fetch_task_result` / `cleanup_task` still work
+  across MCP-server restarts: the in-memory registry is rebuilt from disk on demand.
 - **Delegate worker** (`worker/worker.py`) — a [deepagents](https://github.com/langchain-ai/deepagents)
   agent, run as a subprocess via `uv run` (see `src/worker.ts`). Uses `LocalShellBackend` in
   `virtual_mode=True` to keep filesystem/shell access scoped to the disposable git worktree
   (branch `delegate/<task_id>`), `SubAgent`s for implementer/tester/reviewer roles, and
   `RubricMiddleware` to grade completion against `definition_of_done`/`test_command` instead of
-  trusting the model's own "I'm done" judgment.
+  trusting the model's own "I'm done" judgment. Each run reports real `cost_usd` and
+  `total_tokens` via a litellm success callback so the supervisor knows what the delegation
+  actually cost, and prints a flushed `PROGRESS:` line per graph step so `get_task_status`
+  shows what the worker is doing without waiting for completion.
 - **Packaged skill** (`skills/delegate-heavy-dev/SKILL.md`) — teaches the supervisor when and
   how to delegate.
 
@@ -95,7 +124,7 @@ git add dist/mcp-server.js
 
 ## Verify
 
-- `/mcp` should list the `cc-delegate` server and its three tools.
+- `/mcp` should list the `cc-delegate` server and its four tools.
 - `/status` in the supervisor session should still show `api.anthropic.com` — no worker
   config ever leaks into the supervisor process.
 - Ask the supervisor to delegate a heavy task; it should call `run_dev_task`, poll
@@ -116,8 +145,9 @@ See [`.env.example`](.env.example) for `DELEGATE_API_KEY`, `DELEGATE_MODEL`,
 provider prefix (and the matching `DELEGATE_API_KEY_ENV_VAR`) to target any other provider —
 see [litellm's provider list](https://docs.litellm.ai/docs/providers).
 
-`DELEGATE_MAX_BUDGET_USD` is accepted but not yet enforced mid-run: deepagents/LangGraph has no
-built-in cost meter, so `cost_usd` in `fetch_task_result`/`get_task_status` stays `null` for now.
+`DELEGATE_MAX_BUDGET_USD` is accepted and surfaced in `cost_usd`, but it is not yet enforced
+mid-run: deepagents/LangGraph has no built-in budget cut-off hook, so the value is reported for
+visibility rather than as a hard stop.
 
 ## License
 

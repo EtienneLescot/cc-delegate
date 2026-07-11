@@ -4,4 +4,6 @@ node_modules/
 # install (see README "Install" section). Run `npm run build` before committing.
 .env
 .cc-delegate/
+tests/build/
 *.log
+__pycache__/

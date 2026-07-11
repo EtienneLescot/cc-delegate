@@ -38266,20 +38266,121 @@ var {
 } = getIpcExport();
 
 // src/jobs.ts
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir as mkdir2, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join2, resolve } from "node:path";
+
+// src/persistence.ts
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+var RESULT_MARKER = "RESULT_JSON:";
+var PROGRESS_MARKER = "PROGRESS:";
+function findLastResultLine(stdout) {
+  const lines = stdout.split(/\r?\n/);
+  for (let i2 = lines.length - 1; i2 >= 0; i2--) {
+    if (lines[i2].startsWith(RESULT_MARKER)) return lines[i2];
+  }
+  return null;
+}
+function stripResultMarker(line) {
+  return line.startsWith(RESULT_MARKER) ? line.slice(RESULT_MARKER.length) : line;
+}
+function parseProgressLine(line) {
+  if (!line.startsWith(PROGRESS_MARKER)) return null;
+  try {
+    const obj = JSON.parse(line.slice(PROGRESS_MARKER.length));
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    return obj;
+  } catch {
+    return null;
+  }
+}
+function progressNote(parsed) {
+  if (typeof parsed.note === "string" && parsed.note.length > 0) return parsed.note;
+  if (typeof parsed.node === "string" && parsed.node.length > 0) return `${parsed.node}#${parsed.step ?? "?"}`;
+  return `step ${parsed.step ?? "?"}`;
+}
+function jobsDir(repo, workDir) {
+  return join(repo, workDir, "jobs");
+}
+function jobFilePath(repo, taskId, workDir = ".cc-delegate") {
+  return join(jobsDir(repo, workDir), `${taskId}.json`);
+}
+function serializeJob(job) {
+  const { abort: _abort, ...rest } = job;
+  void _abort;
+  return JSON.stringify(rest, null, 2);
+}
+function deserializeJob(raw) {
+  return JSON.parse(raw);
+}
+async function saveJob(job, workDir = ".cc-delegate") {
+  const path6 = jobFilePath(job.repo, job.taskId, workDir);
+  await mkdir(dirname(path6), { recursive: true });
+  await writeFile(path6, serializeJob(job), "utf8");
+  return path6;
+}
+async function loadJob(repo, taskId, workDir = ".cc-delegate") {
+  const path6 = jobFilePath(repo, taskId, workDir);
+  try {
+    const raw = await readFile(path6, "utf8");
+    return deserializeJob(raw);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw e;
+  }
+}
+async function deletePersistedJob(job, workDir = ".cc-delegate") {
+  const path6 = jobFilePath(job.repo, job.taskId, workDir);
+  try {
+    await unlink(path6);
+  } catch (e) {
+    if (e?.code !== "ENOENT") throw e;
+  }
+}
+var knownRepos = /* @__PURE__ */ new Set();
+function rememberRepo(repo) {
+  if (repo) knownRepos.add(repo);
+}
+async function findPersistedJob(taskId, workDir = ".cc-delegate") {
+  for (const repo of knownRepos) {
+    const j = await loadJob(repo, taskId, workDir);
+    if (j) return j;
+  }
+  return null;
+}
+
+// src/jobs.ts
 var jobs = /* @__PURE__ */ new Map();
-var getJob = (id) => jobs.get(id);
-var putJob = (job) => void jobs.set(job.taskId, job);
+function getJob(id) {
+  return jobs.get(id);
+}
+function putJob(job) {
+  jobs.set(job.taskId, job);
+}
+function deleteJob(id) {
+  jobs.delete(id);
+}
+async function getJobWithFallback(id, cfg2) {
+  const inMem = jobs.get(id);
+  if (inMem) return inMem;
+  return await findPersistedJob(id, cfg2.workDir);
+}
+async function persistJob(job, cfg2) {
+  try {
+    await saveJob(job, cfg2.workDir);
+  } catch (e) {
+  }
+}
 async function createWorktree(cfg2, repoPath, baseBranch) {
   const repo = resolve(repoPath);
   const taskId = `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const branch = `delegate/${taskId}`;
-  const wtRoot = join(repo, cfg2.workDir, "worktrees");
-  await mkdir(wtRoot, { recursive: true });
-  const worktree = join(wtRoot, taskId);
+  const wtRoot = join2(repo, cfg2.workDir, "worktrees");
+  await mkdir2(wtRoot, { recursive: true });
+  const worktree = join2(wtRoot, taskId);
   const base = baseBranch ?? await currentBranch(repo);
   await execa("git", ["worktree", "add", "-b", branch, worktree, base], { cwd: repo });
+  rememberRepo(repo);
   return { taskId, branch, worktree, repo };
 }
 async function currentBranch(repo) {
@@ -38290,89 +38391,181 @@ async function collectDiff(cfg2, repo, worktree, taskId) {
   await execa("git", ["add", "-A"], { cwd: worktree });
   const { stdout: diff } = await execa("git", ["diff", "--cached"], { cwd: worktree });
   const { stdout: names } = await execa("git", ["diff", "--cached", "--name-only"], { cwd: worktree });
-  const logDir = join(repo, cfg2.workDir, "patches");
-  await mkdir(logDir, { recursive: true });
-  const patchPath = join(logDir, `${taskId}.diff`);
-  await writeFile(patchPath, diff, "utf8");
+  const logDir = join2(repo, cfg2.workDir, "patches");
+  await mkdir2(logDir, { recursive: true });
+  const patchPath = join2(logDir, `${taskId}.diff`);
+  await writeFile2(patchPath, diff, "utf8");
   const filesChanged = names.split("\n").map((s) => s.trim()).filter(Boolean);
   return { patchPath, filesChanged };
+}
+async function cleanupJob(cfg2, job, opts = {}) {
+  const deleteBranch = opts.deleteBranch ?? true;
+  const result = { taskId: job.taskId, worktreeRemoved: false, branchDeleted: false, persistedRemoved: false };
+  try {
+    await execa("git", ["worktree", "remove", "--force", job.worktree], { cwd: job.repo });
+    result.worktreeRemoved = true;
+  } catch (e) {
+    if (e?.code !== "ENOENT" && !String(e?.stderr || "").includes("not a working tree")) {
+    }
+  }
+  if (deleteBranch) {
+    try {
+      await execa("git", ["branch", "-D", job.branch], { cwd: job.repo });
+      result.branchDeleted = true;
+    } catch {
+    }
+  }
+  try {
+    await deletePersistedJob(job, cfg2.workDir);
+    result.persistedRemoved = true;
+  } catch {
+  }
+  deleteJob(job.taskId);
+  return result;
 }
 
 // src/worker.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
-import { dirname, join as join2 } from "node:path";
-var __dirname = dirname(fileURLToPath3(import.meta.url));
-var WORKER_SCRIPT = join2(__dirname, "..", "worker", "worker.py");
-var RESULT_MARKER = "RESULT_JSON:";
-async function runWorker(cfg2, args) {
-  const job = getJob(args.taskId);
-  try {
-    const cliArgs = [
-      "run",
-      WORKER_SCRIPT,
-      "--worktree",
-      args.worktree,
-      "--spec",
-      args.spec,
-      "--model",
-      cfg2.model,
-      "--api-key-env-var",
-      cfg2.apiKeyEnvVar,
-      "--recursion-limit",
-      String(args.recursionLimit),
-      "--rubric-max-iterations",
-      String(args.rubricMaxIterations)
-    ];
-    if (args.definitionOfDone) cliArgs.push("--definition-of-done", args.definitionOfDone);
-    if (args.testCommand) cliArgs.push("--test-command", args.testCommand);
-    const { stdout } = await execa("uv", cliArgs, {
-      env: { ...process.env, DELEGATE_API_KEY: cfg2.workerApiKey },
-      cancelSignal: job.abort.signal,
-      reject: false
-    });
-    const line = stdout.split("\n").reverse().find((l) => l.startsWith(RESULT_MARKER));
-    if (!line) {
-      job.status = "failed";
-      job.error = "worker produced no result line; last stdout: " + stdout.slice(-500);
-    } else {
-      const result = JSON.parse(line.slice(RESULT_MARKER.length));
-      job.turns = result.turns;
-      job.summary = result.summary ?? void 0;
-      if (result.status === "succeeded") {
-        const { patchPath, filesChanged } = await collectDiff(cfg2, job.repo, job.worktree, job.taskId);
-        job.patchPath = patchPath;
-        job.filesChanged = filesChanged;
-        job.status = "succeeded";
-      } else {
-        job.status = "failed";
-        job.error = result.error ?? "worker reported failure";
+import { dirname as dirname2, join as join3 } from "node:path";
+var __dirname = dirname2(fileURLToPath3(import.meta.url));
+var WORKER_SCRIPT = join3(__dirname, "..", "worker", "worker.py");
+var RESULT_MARKER2 = "RESULT_JSON:";
+async function updateProgress(job, cfg2, note) {
+  job.progress = note.slice(0, 200);
+  await persistJob(job, cfg2);
+}
+async function runStream(cfg2, args, job) {
+  const cliArgs = [
+    "run",
+    WORKER_SCRIPT,
+    "--worktree",
+    args.worktree,
+    "--spec",
+    args.spec,
+    "--model",
+    cfg2.model,
+    "--api-key-env-var",
+    cfg2.apiKeyEnvVar,
+    "--recursion-limit",
+    String(args.recursionLimit),
+    "--rubric-max-iterations",
+    String(args.rubricMaxIterations)
+  ];
+  if (args.definitionOfDone) cliArgs.push("--definition-of-done", args.definitionOfDone);
+  if (args.testCommand) cliArgs.push("--test-command", args.testCommand);
+  let stdoutRemainder = "";
+  let resultLine;
+  const subprocess = execa("uv", cliArgs, {
+    env: { ...process.env, DELEGATE_API_KEY: cfg2.workerApiKey },
+    cancelSignal: job.abort?.signal,
+    reject: false,
+    all: true
+  });
+  subprocess.stdout?.setEncoding("utf8");
+  subprocess.stdout?.on("data", (chunk) => {
+    stdoutRemainder += chunk;
+    let nlIdx;
+    while ((nlIdx = stdoutRemainder.indexOf("\n")) >= 0) {
+      const line = stdoutRemainder.slice(0, nlIdx).replace(/\r$/, "");
+      stdoutRemainder = stdoutRemainder.slice(nlIdx + 1);
+      if (line.startsWith(RESULT_MARKER2)) {
+        resultLine = line;
+        continue;
+      }
+      const progress = parseProgressLine(line);
+      if (progress) {
+        const note = progressNote(progress);
+        updateProgress(job, cfg2, note).catch(() => {
+        });
       }
     }
+  });
+  const result = await subprocess;
+  if (stdoutRemainder.length > 0) {
+    const tail = stdoutRemainder.replace(/\r$/, "");
+    if (tail.startsWith(RESULT_MARKER2)) resultLine = tail;
+    else {
+      const progress = parseProgressLine(tail);
+      if (progress) {
+        updateProgress(job, cfg2, progressNote(progress)).catch(() => {
+        });
+      }
+    }
+    stdoutRemainder = "";
+  }
+  const stdout = result.stdout ?? "";
+  const finalResultLine = resultLine ?? findLastResultLine(stdout);
+  if (result.signal === "SIGTERM" || result.signal === "SIGABRT" || result.signal === "SIGINT" || job.abort?.signal.aborted) {
+    job.status = "failed";
+    job.error = "worker aborted";
+    await persistJob(job, cfg2);
+    return finalResultLine ?? "";
+  }
+  if (!finalResultLine) {
+    job.status = "failed";
+    job.error = "worker produced no result line; tail: " + (stdout ? stdout.slice(-500) : "").toString();
+    await persistJob(job, cfg2);
+    return "";
+  }
+  try {
+    const result_json = JSON.parse(stripResultMarker(finalResultLine));
+    job.turns = result_json.turns;
+    if (typeof result_json.cost_usd === "number" && Number.isFinite(result_json.cost_usd)) {
+      job.costUsd = result_json.cost_usd;
+    }
+    if (typeof result_json.total_tokens === "number" && Number.isFinite(result_json.total_tokens)) {
+      job.totalTokens = result_json.total_tokens;
+    }
+    if (typeof result_json.summary === "string") job.summary = result_json.summary;
+    if (result_json.status === "succeeded") {
+      const { patchPath, filesChanged } = await collectDiff(cfg2, job.repo, job.worktree, job.taskId);
+      job.patchPath = patchPath;
+      job.filesChanged = filesChanged;
+      job.status = "succeeded";
+    } else {
+      job.status = "failed";
+      job.error = result_json.error ?? "worker reported failure";
+    }
+  } catch (e) {
+    job.status = "failed";
+    job.error = "could not parse result line: " + (e?.message ?? String(e));
+  }
+  await persistJob(job, cfg2);
+  return finalResultLine;
+}
+async function runWorker(cfg2, args) {
+  const job = getJob(args.taskId);
+  if (!job) {
+    return;
+  }
+  try {
+    await runStream(cfg2, args, job);
   } catch (err) {
     job.status = "failed";
     if (err?.code === "ENOENT") {
-      job.error = "'uv' was not found on PATH. The worker needs uv to run worker/worker.py (https://docs.astral.sh/uv/getting-started/installation/).";
+      job.error = "uv was not found on PATH. The worker needs uv to run worker/worker.py (https://docs.astral.sh/uv/getting-started/installation/).";
     } else {
       job.error = err?.message ?? String(err);
     }
+    await persistJob(job, cfg2);
   }
 }
 
 // src/mcp-server.ts
 var cfg = loadConfig();
-var server = new McpServer({ name: "cc-delegate", version: "0.1.0" });
+var server = new McpServer({ name: "cc-delegate", version: "0.2.0" });
 server.registerTool(
   "run_dev_task",
   {
     title: "Delegate a heavy dev task to the worker model",
-    description: "Starts an autonomous coding worker (on whatever model DELEGATE_MODEL points to) on an isolated git worktree. Returns a task_id immediately; poll with get_task_status, then fetch_task_result.",
+    description: "Starts an autonomous coding worker on an isolated git worktree. Returns a task_id immediately.",
     inputSchema: {
       spec: external_exports.string().describe("Objective and constraints in natural language"),
       repo_path: external_exports.string().describe("Absolute path to the target git repository"),
       test_command: external_exports.string().optional(),
       definition_of_done: external_exports.string().optional(),
       base_branch: external_exports.string().optional(),
-      recursion_limit: external_exports.number().optional().describe("LangGraph step budget (every model + tool call counts), not a turn count"),
+      recursion_limit: external_exports.number().optional().describe("LangGraph step budget"),
       timeout_ms: external_exports.number().optional()
     }
   },
@@ -38381,9 +38574,10 @@ server.registerTool(
     const abort = new AbortController();
     const timeout = a2.timeout_ms ?? cfg.defaultTimeoutMs;
     const timer = setTimeout(() => abort.abort(), timeout);
-    const job = { taskId, status: "running", turns: 0, costUsd: null, branch, worktree, repo, abort };
+    const job = { taskId, status: "running", turns: 0, costUsd: null, totalTokens: null, branch, worktree, repo, abort };
     putJob(job);
-    runWorker(cfg, {
+    void persistJob(job, cfg);
+    void runWorker(cfg, {
       spec: a2.spec,
       worktree,
       taskId,
@@ -38399,13 +38593,9 @@ server.registerTool(
 );
 server.registerTool(
   "get_task_status",
-  {
-    title: "Poll a delegated task",
-    description: "Returns current status, progress, cost and turns.",
-    inputSchema: { task_id: external_exports.string() }
-  },
+  { title: "Poll a delegated task", description: "Returns current status, progress, cost and turns.", inputSchema: { task_id: external_exports.string() } },
   async ({ task_id }) => {
-    const j = getJob(task_id);
+    const j = await getJobWithFallback(task_id, cfg) ?? getJob(task_id);
     if (!j) return { content: [{ type: "text", text: JSON.stringify({ error: "unknown task_id" }) }], isError: true };
     return { content: [{ type: "text", text: JSON.stringify({
       task_id,
@@ -38413,19 +38603,16 @@ server.registerTool(
       progress: j.progress,
       turns: j.turns,
       cost_usd: j.costUsd,
+      total_tokens: j.totalTokens,
       error: j.error
     }) }] };
   }
 );
 server.registerTool(
   "fetch_task_result",
-  {
-    title: "Fetch the result of a completed task",
-    description: "When status is 'succeeded', returns summary, patch path, files changed, tests and cost.",
-    inputSchema: { task_id: external_exports.string() }
-  },
+  { title: "Fetch the result of a completed task", description: "Returns summary, patch, files changed, tests and cost.", inputSchema: { task_id: external_exports.string() } },
   async ({ task_id }) => {
-    const j = getJob(task_id);
+    const j = await getJobWithFallback(task_id, cfg) ?? getJob(task_id);
     if (!j) return { content: [{ type: "text", text: JSON.stringify({ error: "unknown task_id" }) }], isError: true };
     return { content: [{ type: "text", text: JSON.stringify({
       task_id,
@@ -38435,11 +38622,25 @@ server.registerTool(
       files_changed: j.filesChanged ?? [],
       tests: j.tests ?? {},
       cost_usd: j.costUsd,
+      total_tokens: j.totalTokens,
       num_turns: j.turns,
       branch: j.branch,
       worktree: j.worktree,
       error: j.error
     }) }] };
+  }
+);
+server.registerTool(
+  "cleanup_task",
+  { title: "Tear down a finished task", description: "Removes the worktree, branch, and persisted file for a finished task.", inputSchema: { task_id: external_exports.string(), delete_branch: external_exports.boolean().optional() } },
+  async ({ task_id, delete_branch }) => {
+    const j = await getJobWithFallback(task_id, cfg) ?? getJob(task_id);
+    if (!j) return { content: [{ type: "text", text: JSON.stringify({ error: "unknown task_id" }) }], isError: true };
+    if (j.status === "running") {
+      return { content: [{ type: "text", text: JSON.stringify({ task_id, error: "task is still running; abort or wait before calling cleanup_task" }) }], isError: true };
+    }
+    const result = await cleanupJob(cfg, j, { deleteBranch: delete_branch ?? true });
+    return { content: [{ type: "text", text: JSON.stringify({ task_id, cleaned: true, ...result }) }] };
   }
 );
 var transport = new StdioServerTransport();
