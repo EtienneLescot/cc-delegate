@@ -113,6 +113,10 @@ Brief: docs/specs/001.
 4. **Environment beats intelligence**: both major failures were environment traps, not model
    weakness. When a delegation fails, inspect the worktree before blaming the model or
    raising budgets.
+5. **Delegate modification, not synthesis**: bounded changes to existing code converge
+   (lots A/B); open-ended "write N new files from cross-language references" burned a full
+   budget producing two lines (migration lot M1). Greenfield ports either get file-level
+   skeletons in the spec or are implemented by the supervisor directly.
 
 ## 7. Evolution
 
