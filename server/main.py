@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mcp.server.fastmcp import FastMCP
 
 import config_store
+import oauth
 from config import load_config
 from jobs import (
     cleanup_job,
@@ -289,9 +290,8 @@ async def store_api_key(profile: str, key: str | None = None) -> str:
 
 @mcp.tool(
     description=(
-        "Reports OAuth auth state for a profile (token cache present or not). Starting a new "
-        "device flow from here is not implemented yet (roadmap v0.4); for litellm OAuth "
-        "providers, the first interactive run performs the device flow and caches tokens."
+        "Reports OAuth token-cache state on disk for a profile (present or not). Complementary "
+        "to auth_poll, which tracks a live device flow. Read-only."
     )
 )
 async def auth_status(profile: str) -> str:
@@ -300,6 +300,60 @@ async def auth_status(profile: str) -> str:
     if not prof:
         return json.dumps({"error": f"unknown profile {profile!r}"})
     return json.dumps({"profile": profile, **config_store.auth_state(prof)})
+
+
+@mcp.tool(
+    description=(
+        "Starts an OAuth device flow for a profile's provider (GitHub Copilot supported today). "
+        "Returns a verification URL and a user code to show the user, plus a flow_id. The user "
+        "visits the URL, enters the code, and authorizes; poll completion with auth_poll(flow_id). "
+        "Tokens are cached by litellm; this tool never sees or returns them. Only call on explicit "
+        "user request."
+    )
+)
+async def setup_provider_auth(profile: str) -> str:
+    store = config_store.load_store()
+    prof = store["profiles"].get(profile)
+    if not prof:
+        return json.dumps({"error": f"unknown profile {profile!r}"})
+
+    provider = oauth.provider_key_for_model(prof.get("model", ""))
+    if provider is None:
+        return json.dumps(
+            {"error": f"profile {profile!r} is not an OAuth provider (model {prof.get('model')!r})"}
+        )
+    if provider not in oauth.PROVIDER_AUTHENTICATORS:
+        return json.dumps(
+            {"error": f"OAuth device flow not implemented for {provider!r} yet; only github_copilot is supported"}
+        )
+
+    try:
+        # The device-code request does a blocking HTTPS call; keep it off the loop.
+        info = await asyncio.get_event_loop().run_in_executor(
+            None, oauth.start_device_flow, provider
+        )
+    except Exception as e:  # noqa: BLE001 - surface litellm/network errors as a clean response
+        return json.dumps({"error": f"failed to start device flow: {type(e).__name__}: {e}"})
+
+    return json.dumps(
+        {
+            "profile": profile,
+            "provider": provider,
+            "verification_uri": info["verification_uri"],
+            "user_code": info["user_code"],
+            "flow_id": info["flow_id"],
+            "expires_in": info.get("expires_in"),
+            "instructions": (
+                f"Visit {info['verification_uri']} and enter code {info['user_code']}, then "
+                f"call auth_poll(flow_id='{info['flow_id']}') to confirm authorization."
+            ),
+        }
+    )
+
+
+@mcp.tool(description="Polls a device flow started by setup_provider_auth: pending | authorized | failed.")
+async def auth_poll(flow_id: str) -> str:
+    return json.dumps(oauth.poll_status(flow_id))
 
 
 if __name__ == "__main__":

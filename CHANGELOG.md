@@ -3,6 +3,30 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.2
+
+OAuth device flow (GitHub Copilot) — subscription auth without an API key.
+
+### Added
+
+- **`setup_provider_auth(profile)`** and **`auth_poll(flow_id)`** MCP tools. For a profile on
+  an OAuth provider (GitHub Copilot today), `setup_provider_auth` starts litellm's device flow
+  and returns the verification URL + user code for the supervisor to show you, plus an opaque
+  `flow_id`; you authorize in a browser and `auth_poll` reports `pending`/`authorized`/`failed`.
+- **`server/oauth.py`**: a headless device-flow manager. It drives litellm's
+  `github_copilot` `Authenticator` directly (`_get_device_code` then a background-threaded
+  `_poll_for_access_token`) instead of its stdout-printing `_login`, so the URL/code are
+  relayed rather than printed. The device code and access tokens never leave the module —
+  tool responses carry only the verification URL, user code, and flow id. litellm is imported
+  lazily, so the module and its tests load without litellm present.
+
+### Notes
+
+- ChatGPT subscription OAuth is a separate, less-stable path and is not wired yet; `chatgpt`
+  profiles map to a provider but `setup_provider_auth` reports it as unsupported for now.
+- The device flow itself can only be completed by a human with a browser; the test suite
+  exercises the full pending→authorized/failed lifecycle against a mocked authenticator.
+
 ## 0.3.1
 
 Configuration facade: the plugin configures itself through its own MCP tools.

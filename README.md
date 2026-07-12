@@ -145,6 +145,13 @@ Profiles live in `~/.cc-delegate/config.json`, facade-stored keys in
 `~/.cc-delegate/credentials.json`. Any litellm-routable model works — see
 [litellm's provider list](https://docs.litellm.ai/docs/providers).
 
+**Subscription providers (OAuth):** for a profile on an OAuth provider — GitHub Copilot today
+(`set_model_profile("copilot", "litellm:github_copilot/gpt-5")`, no API key) — run
+`setup_provider_auth("copilot")`. It returns a verification URL and a user code; visit the URL,
+enter the code, authorize, and `auth_poll(flow_id)` flips to `authorized`. litellm caches the
+tokens, so later runs need no interaction and the key never touches the config. ChatGPT
+subscription OAuth is planned but not wired yet.
+
 **Legacy env path (still supported):** see [`.env.example`](.env.example) for
 `DELEGATE_API_KEY`, `DELEGATE_MODEL`, `DELEGATE_API_KEY_ENV_VAR`, and the guardrails
 (`DELEGATE_RECURSION_LIMIT`, `DELEGATE_RUBRIC_MAX_ITERATIONS`, `DELEGATE_TIMEOUT_MS`). It

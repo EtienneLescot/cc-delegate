@@ -42,12 +42,15 @@ profile"). Quotas, keys, and knowledge of which models work belong to the user.
 ## Configuration tools — explicit user request only
 
 The `provider_status` / `set_model_profile` / `remove_model_profile` / `set_default_profile` /
-`store_api_key` / `auth_status` tools change what the worker spends money on. Call them ONLY
-when the user explicitly asked for a configuration change. Never reconfigure as a side effect
-of a failing delegation — report the failure and let the user decide. For API keys, prefer
-calling `store_api_key` WITHOUT the `key` argument: the server asks the user directly through
-an elicitation dialog and the secret never enters this conversation; if you pass `key`
-yourself, tell the user their key transited the chat and suggest rotating it.
+`store_api_key` / `auth_status` / `setup_provider_auth` / `auth_poll` tools change what the
+worker spends money on. Call them ONLY when the user explicitly asked for a configuration
+change. Never reconfigure as a side effect of a failing delegation — report the failure and
+let the user decide. For API keys, prefer calling `store_api_key` WITHOUT the `key` argument:
+the server asks the user directly through an elicitation dialog and the secret never enters
+this conversation; if you pass `key` yourself, tell the user their key transited the chat and
+suggest rotating it. For subscription providers (GitHub Copilot), `setup_provider_auth`
+returns a verification URL and user code — relay both to the user verbatim, then poll
+`auth_poll(flow_id)` until it reads `authorized`.
 
 ## Rules
 
