@@ -26,6 +26,7 @@ import config_store
 import events
 import oauth
 import preflight as preflight_mod
+import statusline_render
 from config import load_config
 from dashboard import start_dashboard
 from jobs import (
@@ -85,9 +86,11 @@ async def run_dev_task(
         "turns": 0,
         "costUsd": None,
         "totalTokens": None,
+        "model": resolved["model"],  # for the status line / dashboard
     }
     put_job(job)
     persist_job(job, cfg.work_dir)
+    statusline_render.write_statusline(job)
 
     # Preflight the acceptance gate BEFORE spending worker tokens: a broken
     # test RUNNER (vs merely failing assertions) makes the rubric unpassable

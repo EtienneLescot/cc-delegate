@@ -66,6 +66,41 @@ every task of the session. The supervisor only needs `get_task_status` at decisi
 your eyes do the monitoring for free. Disable with `DELEGATE_DASHBOARD=0`, pin the port with
 `DELEGATE_DASHBOARD_PORT`. Everything stays on 127.0.0.1.
 
+## Status line — live progress inside Claude Code
+
+The dashboard lives in a browser tab; the **status line** puts the same glance *inside* Claude
+Code's own status bar, token-free. While a delegation runs you see one live line:
+
+```
+⏳ delegate t_…yqsldx · MiniMax-M3 · step 24 · writing src/auth/tokens.js
+⚠ delegate t_…yqsldx · asks: which token TTL? · → answer_worker
+✓ delegate t_…yqsldx · done · 4 files · $0.24
+```
+
+How it stays token-free on both ends: the MCP server (already resident for the session) renders
+the line in Python and writes it to `~/.cc-delegate/statusline`; the status-line script Claude
+Code runs is a dependency-free reader (no `jq`, no `python`, no JSON parsing) that just prints
+the pre-baked line while it is fresh. The harness runs it locally — it never consumes API tokens.
+
+Wire it once in `~/.claude/settings.json` (point `command` at the shipped reader; **`refreshInterval`
+is required** — status-line event triggers go quiet while the session waits on the background
+worker, so the timer is what keeps the line live):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/cc-delegate-statusline.sh",
+    "refreshInterval": 2
+  }
+}
+```
+
+Copy `statusline/cc-delegate-statusline.sh` (or, on Windows without Git Bash, the `.ps1`
+variant) to `~/.claude/` and `chmod +x` it. A running task refreshes the line on every event; a
+blocked task keeps its question visible until you answer; a finished task shows a short-lived
+summary that then fades — no stale state left on screen.
+
 ## Worker → supervisor communication
 
 The worker is not fire-and-forget anymore. Three tools are injected into its agent loop:

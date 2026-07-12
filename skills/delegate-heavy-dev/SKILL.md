@@ -31,7 +31,9 @@ provider works).
      worker fight a broken gate.
    - **`dashboard_url`**: give it to the user right away — it streams the worker's live
      activity (every shell command, progress note, question) in their browser at zero token
-     cost. With the dashboard in the user's hands, you don't need to poll for *their* sake.
+     cost. If they have the **status line** configured, the active task also shows live in
+     Claude Code's own status bar (also token-free). With either in the user's hands, you don't
+     need to poll for *their* sake.
 3. **Supervise with long-polls, not timers.** Call `get_task_status(task_id, wait_seconds=120)`
    in a loop: it returns EARLY on any change (progress, completion, question). Watch two fields:
    - `status == "needs_input"`: the worker is blocked on the included `question`. If it's a

@@ -27,6 +27,7 @@ from typing import Any
 from config import Config
 from events import publish
 from jobs import collect_diff, persist_job, runtime, salvage_worktree
+from statusline_render import write_statusline
 from persistence import (
     find_last_result_line,
     parse_progress_line,
@@ -89,6 +90,7 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
         if note:
             job["progress"] = note
         persist_job(job, cfg.work_dir)
+        write_statusline(job)  # refresh the token-free status line
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -141,6 +143,8 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
                 continue
             progress = parse_progress_line(line)
             if progress:
+                if progress.get("step"):
+                    job["lastStep"] = progress["step"]
                 _touch(progress_note(progress))
                 _publish({"kind": progress.get("kind", "progress"), **progress})
         await proc.wait()
@@ -152,6 +156,7 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
         if salvage_worktree(cfg.work_dir, job):
             job["salvaged"] = True
         persist_job(job, cfg.work_dir)
+        write_statusline(job)
         _publish({
             "kind": "cancelled" if rt.get("cancelled") else kind,
             "error": job["error"], "salvaged": job.get("salvaged", False),
@@ -192,6 +197,7 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
         job.update(diff)
         job["status"] = "succeeded"
         persist_job(job, cfg.work_dir)
+        write_statusline(job)
         _publish({
             "kind": "succeeded",
             "files_changed": len(job.get("filesChanged", [])),

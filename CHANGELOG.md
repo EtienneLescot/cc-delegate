@@ -3,6 +3,36 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.0
+
+Native status-line integration — live progress *inside* Claude Code, not in a separate tab.
+
+### Added
+
+- **Token-free status line.** A one-line live view of the active delegation renders in Claude
+  Code's own status bar: `⏳ delegate t_…yqsldx · MiniMax-M3 · step 24 · writing tokens.js`,
+  turning `⚠ … asks: which token TTL? · → answer_worker` when the worker blocks on a question,
+  and `✓ … done · 4 files · $0.24` when it finishes. Both ends are token-free: the MCP server
+  (already resident) does the rendering in Python and writes a pre-baked line to
+  `~/.cc-delegate/statusline`; the status-line script is a dependency-free reader (no jq, no
+  python, no JSON parsing) so it runs reliably in the harness's status-line shell.
+- **Lifecycle by expiry.** The rendered file carries an expiry epoch: a running task refreshes
+  it on every event, a blocked task gets a long window so the question stays visible until
+  answered, and a finished task writes a short-lived final line that fades on its own — no stale
+  "still running" left on screen.
+- **`statusline/` scripts + wiring.** Ships `cc-delegate-statusline.sh` (Git Bash / sh) and a
+  `.ps1` fallback for Windows without Git Bash. README documents the `settings.json` block; the
+  required `refreshInterval` keeps the line live while the session sits idle waiting on the
+  background worker (status-line event triggers otherwise go quiet).
+
+### Notes
+
+- The status line complements the SSE dashboard (0.4.0) rather than replacing it: the status
+  line is the always-visible glance; the dashboard is the full firehose. A model-rendered
+  summary still happens only where the supervisor already surfaces (long-poll returns on a
+  question / completion), so richer inline output costs a turn only when one was being spent
+  anyway.
+
 ## 0.4.0
 
 Supervision, communication & resilience. Every change is a direct fix for a failure mode
