@@ -39,6 +39,8 @@ delegation session (Pong on MiniMax M3) — see CHANGELOG for the incident detai
       while waiting).
 - [x] **Live SSE dashboard** (`http://127.0.0.1:45673`): the user watches every shell command,
       progress note and question in a browser — zero supervisor tokens.
+      *(Superseded: removed in v0.6.0; the desktop app can't integrate a separate tab and the user
+      opted for poll-on-demand. Event bus + `.jsonl` logs remain, now backing `get_task_progress`.)*
 - [x] **`cancel_task`**: kills the worker's whole process tree, salvages, unblocks cleanup.
 - [x] **Per-command timeout with tree kill** in the worker's shell backend (the stock
       backend's timeout leaves grandchildren holding the stdout pipe → infinite hang).
@@ -48,6 +50,9 @@ delegation session (Pong on MiniMax M3) — see CHANGELOG for the incident detai
       supervisor before any worker token is spent.
 - [x] **Long-poll `get_task_status(wait_seconds=...)`**: returns early on change; kills the
       poll-timer dance.
+      *(Superseded in v0.8.0: replaced by cheap instant `get_task_status` + verbose
+      `get_task_progress`, polled on a supervisor-scheduled cadence — the supervisor's own
+      scheduler makes a blocking long-poll unnecessary.)*
 - [x] **Per-task observability**: append-only `.jsonl` event log per task
       (`.cc-delegate/logs/<task_id>.jsonl`) feeding the dashboard and post-mortems.
 
@@ -74,6 +79,14 @@ See [docs/specs/002-oauth-subscription-providers.md](docs/specs/002-oauth-subscr
 
 ## Later / unscheduled
 
-- Parallel multi-task delegation (architecture already supports concurrent worktrees)
+- **Proactive mid-run steering** — let the supervisor redirect a *running* worker at any moment,
+  not only in reply to a question. Today `answer_worker` only reaches a worker that is blocked on
+  `ask_supervisor` (it reads its comm-dir mailbox once, while waiting). To steer proactively
+  ("stop X, do Y instead"), the worker must **poll its mailbox periodically during the run**; then
+  `answer_worker` (or a dedicated `steer_task`) can nudge it. Cheap to add, but changes the worker
+  loop — deferred until the async/poll model has settled in real use.
+- Parallel multi-task delegation — architecture already supports concurrent worktrees, and v0.8.0
+  added decompose/parallelize guidance to the skill; a helper to fan out + track a batch could come
+  later.
 - Mid-run budget enforcement (cut the run when accumulated `cost_usd` crosses the cap)
 - Fine-grained tool policy for the worker (allow/deny beyond the current system-prompt rules)
