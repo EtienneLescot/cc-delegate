@@ -3,6 +3,72 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.4.0
+
+Supervision, communication & resilience. Every change is a direct fix for a failure mode
+observed in the first full real-world delegation session (a Pong game built on MiniMax M3):
+a stalled worker nobody could stop, a whole-drive `find /` that froze the run for 20+ minutes,
+a completed-but-uncommitted result lost to a recursion overrun, a broken `test_command` that
+sent the worker chasing phantom failures, and a supervisor reduced to blind timer polling.
+
+### Added
+
+- **Worker → supervisor communication.** Three tools are injected into the worker's agent
+  loop: `report_progress(update)` (fire-and-forget status lines), `ask_supervisor(question,
+  context)` and `report_blocker(problem, attempts)` (both BLOCK the worker — zero tokens
+  spent — and flip the task to status `needs_input`). The supervisor answers with the new
+  **`answer_worker(task_id, answer)`** MCP tool; delivery is an atomic file drop in
+  `<repo>/.cc-delegate/comm/<task_id>/`, never through the model conversation. Unanswered
+  questions time out (`DELEGATE_ASK_TIMEOUT_S`, default 600s) into "proceed conservatively".
+- **Live SSE dashboard.** The MCP server serves `http://127.0.0.1:45673` (fallback: ephemeral
+  port; URL echoed in `run_dev_task`/`get_task_status` responses and
+  `~/.cc-delegate/dashboard.json`): a one-page live feed of every task — each shell command,
+  progress report, question, answer, and verdict, streamed over Server-Sent Events from the
+  new per-task event log. Monitoring moves to the user's browser at **zero supervisor token
+  cost**. `DELEGATE_DASHBOARD=0` disables; `DELEGATE_DASHBOARD_PORT` pins the port.
+- **`cancel_task(task_id)`.** Kills the worker's WHOLE process tree (`taskkill /T` / process
+  groups — killing just the child leaves grandchildren holding the stdout pipe), salvages
+  uncommitted work, marks the task `cancelled`, and unblocks `cleanup_task`. Works on jobs
+  from a previous server session via the persisted worker PID.
+- **Salvage snapshots.** Any non-succeeded ending (failed, timeout, cancelled) now stages the
+  worktree, writes the patch file, and best-effort WIP-commits on the delegate branch.
+  `fetch_task_result` reports `salvaged: true` and returns the patch — a run that finished the
+  work but died before committing (the exact Pong incident) is no longer a total loss.
+- **`test_command` preflight.** `run_dev_task` executes the test command once in the fresh
+  worktree and returns `preflight` (+ advisory `preflight_note`). A broken test RUNNER — the
+  gate that can never pass — is caught before a single worker token is spent.
+- **Long-poll `get_task_status(task_id, wait_seconds=...)`.** Returns EARLY on any change
+  (progress, completion, question). Status now also carries `elapsed_s`,
+  `last_activity_age_s`, `question` + `action_required`, `salvaged`, and `dashboard_url`.
+- **Per-task event log** (`.cc-delegate/logs/<task_id>.jsonl`): append-only trace of every
+  lifecycle event, shell command, progress note, question and answer — feeds the dashboard
+  live and post-mortems after the fact.
+
+### Fixed
+
+- **Per-command timeout now actually terminates stuck commands.** The stock deepagents
+  backend uses `subprocess.run(shell=True, timeout=...)`; on Windows, CPython's timeout path
+  kills only the direct shell and then re-reads the pipes without a timeout — a surviving
+  grandchild (e.g. `bash → find`) holds stdout open and hangs the run indefinitely. The
+  worker's shell backend now runs commands itself and kills the entire process tree on
+  expiry (`DELEGATE_CMD_TIMEOUT_S`, default 120s), returning partial output to the model.
+  The same tree-kill applies to the task-level timeout in the launcher.
+- **Whole-drive scans refused.** `find /` (or `find C:/`) is rejected with guidance before it
+  runs, and the worker's system prompt forbids leaving the working directory — the exact
+  pathology that froze the first Pong delegation.
+- **Shell activity is now visible.** Each command start is announced as a `PROGRESS:` line
+  (`$ <command>`), so `get_task_status` and the dashboard show live activity during long
+  tool calls instead of a frozen step marker.
+- **Virtual-path misplacement mitigated.** deepagents' `virtual_mode` remaps absolute paths
+  under the worktree root (`/c/Users/...` → `<worktree>/c/Users/...`), silently misplacing
+  files; the worker's system prompt now mandates relative paths.
+
+### Notes
+
+- The supervisor skill now teaches: long-polls over timers, `needs_input` handling,
+  preflight verification, salvage review before re-delegation, and a recovery playbook
+  (preserve → diagnose code-bug-vs-test-bug → re-delegate bounded).
+
 ## 0.3.4
 
 ### Fixed

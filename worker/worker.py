@@ -11,35 +11,82 @@ JSON result line to stdout. Invoked as a subprocess by the MCP server
 (server/worker_launcher.py) — this script owns the agent loop only; git
 worktree setup, diff collection, and job bookkeeping stay in the server.
 
-During the run the worker also emits one ``PROGRESS:`` line per graph step
-to stdout so the MCP server can refresh its ``get_task_status`` view live.
+Stdout is the upward channel to the server:
+
+- ``PROGRESS:`` lines — one per graph step, per shell command start, and per
+  explicit report_progress call — feed get_task_status and the live dashboard;
+- ``QUESTION:`` lines — emitted by ask_supervisor / report_blocker — flip the
+  job to ``needs_input``; the worker then blocks (token-free) polling the
+  comm dir until answer_worker drops a reply file;
+- the final ``RESULT_JSON:`` line carries the verdict.
 """
 
 import argparse
 import json
 import os
+import re
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
+import uuid
 
 import litellm
 
 from deepagents import RubricMiddleware, SubAgent, create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
+from deepagents.backends.protocol import ExecuteResponse
 
 RESULT_MARKER = "RESULT_JSON:"
+PROGRESS_MARKER = "PROGRESS:"
+QUESTION_MARKER = "QUESTION:"
+
+DEFAULT_COMMAND_TIMEOUT = 120
+DEFAULT_ASK_TIMEOUT = 600
+
+# Whole-drive scans (`find /`, `find C:/`) once froze a delegation for 20+
+# minutes. The per-command timeout now bounds the damage, but there is never
+# a reason to leave the worktree — refuse outright and tell the model why.
+_DRIVE_SCAN_RE = re.compile(r"""\bfind\s+['"]?(?:/|[A-Za-z]:[/\\]?)['"]?(?:\s|$)""")
+
+
+def emit_progress(payload: dict) -> None:
+    print(PROGRESS_MARKER + json.dumps(payload), flush=True)
+
+
+def emit_question(payload: dict) -> None:
+    print(QUESTION_MARKER + json.dumps(payload), flush=True)
+
+
+def kill_tree(pid: int) -> None:
+    """Kill ``pid`` and every descendant — a plain kill leaves grandchildren
+    holding the output pipes, which turns one stuck command into a stuck run."""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, stdin=subprocess.DEVNULL, timeout=15,
+            )
+        else:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+    except Exception:  # noqa: BLE001 - cleanup must never crash the agent loop
+        pass
 
 
 def _find_bash() -> str | None:
     """Locate a bash executable on Windows so the worker's shell commands run
     under bash instead of cmd.exe.
 
-    deepagents' LocalShellBackend runs commands with ``subprocess.run(shell=True)``,
-    which on Windows means cmd.exe. Models routinely emit Unix commands
-    (``ls``, ``find``, ``cat``, ``&&``, forward-slash paths) that cmd.exe
-    rejects — the worker then burns turns fighting the shell. Routing through
-    bash (present via Git/hermes on most dev machines) fixes that. Returns None
-    when no bash is found, in which case we leave the default backend untouched.
+    Models routinely emit Unix commands (``ls``, ``find``, ``cat``, ``&&``,
+    forward-slash paths) that cmd.exe rejects — the worker then burns turns
+    fighting the shell. Routing through bash (present via Git/hermes on most
+    dev machines) fixes that. Returns None when no bash is found, in which
+    case commands run through the default shell.
     """
     found = shutil.which("bash")
     if found:
@@ -54,32 +101,213 @@ def _find_bash() -> str | None:
     return None
 
 
-class BashShellBackend(LocalShellBackend):
-    """LocalShellBackend that routes commands through bash on Windows.
+class SupervisedShellBackend(LocalShellBackend):
+    """LocalShellBackend with three field-tested hardenings:
 
-    Each command is written to a temp script inside the working directory and
-    run via ``"<bash>" "<script>"`` — delegating to the parent's cmd.exe path,
-    but with bash as the actual interpreter. Using a script file (not an inline
-    ``bash -c "…"``) sidesteps all Windows/cmd/bash quoting conflicts.
+    1. **Command-start announcements** — every command is echoed as a
+       ``PROGRESS:`` line before it runs, so the dashboard and
+       get_task_status show live activity instead of a frozen marker.
+    2. **Tree-killing timeout** — the stock backend's
+       ``subprocess.run(shell=True, timeout=...)`` kills only the direct
+       shell on timeout; on Windows CPython then re-``communicate()``s
+       without a timeout, and a surviving grandchild holding the stdout
+       pipe hangs the whole run indefinitely. We run the process ourselves
+       and kill the entire tree.
+    3. **bash routing on Windows** — each command is written to a temp
+       script and run via ``[bash, script]`` (no cmd.exe, no quoting
+       conflicts). Elsewhere the default shell is already sh-compatible.
     """
 
-    def __init__(self, *args, bash_path: str, **kwargs) -> None:
+    def __init__(self, *args, bash_path: str | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._bash_path = bash_path
 
-    def execute(self, command: str, *, timeout: int | None = None):
-        fd, path = tempfile.mkstemp(suffix=".sh", dir=str(self.cwd))
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        if not command or not isinstance(command, str):
+            return ExecuteResponse(
+                output="Error: Command must be a non-empty string.", exit_code=1, truncated=False
+            )
+        if _DRIVE_SCAN_RE.search(command):
+            return ExecuteResponse(
+                output=(
+                    "Error: refusing to scan a filesystem/drive root. Everything relevant is "
+                    "inside the current working directory — search there instead "
+                    "(e.g. `find . -name ...` or `ls <subdir>`)."
+                ),
+                exit_code=1,
+                truncated=False,
+            )
+
+        effective_timeout = timeout if timeout is not None else self._default_timeout
+        emit_progress({
+            "kind": "shell",
+            "command": command[:200],
+            "note": "$ " + command[:160],
+        })
+
+        script_path: str | None = None
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-                f.write("set -e\n" + command + "\n")
-            script = path.replace("\\", "/")
-            return super().execute(f'"{self._bash_path}" "{script}"', timeout=timeout)
-        finally:
+            if self._bash_path:
+                fd, script_path = tempfile.mkstemp(suffix=".sh", dir=str(self.cwd))
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                    f.write("set -e\n" + command + "\n")
+                popen_args = [self._bash_path, script_path]
+                shell = False
+            else:
+                popen_args = command
+                shell = True
+            proc = subprocess.Popen(
+                popen_args,
+                shell=shell,
+                cwd=str(self.cwd),
+                env=self._env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=(os.name != "nt"),
+            )
             try:
-                os.remove(path)
+                stdout, stderr = proc.communicate(timeout=effective_timeout)
+            except subprocess.TimeoutExpired:
+                kill_tree(proc.pid)
+                try:
+                    stdout, stderr = proc.communicate(timeout=10)
+                except Exception:  # noqa: BLE001
+                    stdout, stderr = "", ""
+                partial = (stdout or "")[-2000:]
+                msg = (
+                    f"Error: Command timed out after {effective_timeout} seconds and its whole "
+                    "process tree was killed. Do not simply retry it — use a narrower/faster "
+                    "variant, or pass a larger `timeout` only if the command legitimately needs it."
+                )
+                if partial.strip():
+                    msg += f"\n\nPartial output before the kill:\n{partial}"
+                return ExecuteResponse(output=msg, exit_code=124, truncated=False)
+        except Exception as e:  # noqa: BLE001 - mirror base: errors become a response
+            return ExecuteResponse(
+                output=f"Error executing command ({type(e).__name__}): {e}",
+                exit_code=1,
+                truncated=False,
+            )
+        finally:
+            if script_path:
+                try:
+                    os.remove(script_path)
+                except OSError:
+                    pass
+
+        # Same output shaping as the stock backend: stderr lines prefixed,
+        # size cap, exit-code note.
+        output_parts = []
+        if stdout:
+            output_parts.append(stdout)
+        if stderr:
+            output_parts.extend(f"[stderr] {line}" for line in stderr.strip().split("\n"))
+        output = "\n".join(output_parts) if output_parts else "<no output>"
+
+        truncated = False
+        if len(output) > self._max_output_bytes:
+            output = output[: self._max_output_bytes]
+            output += f"\n\n... Output truncated at {self._max_output_bytes} bytes."
+            truncated = True
+        if proc.returncode != 0:
+            output = f"{output.rstrip()}\n\nExit code: {proc.returncode}"
+
+        return ExecuteResponse(output=output, exit_code=proc.returncode, truncated=truncated)
+
+
+# ── Supervisor communication tools ──────────────────────────────────────────
+# Exposed to the agent so it can talk UPWARD during the run instead of only
+# delivering a final report. report_progress is fire-and-forget; the other
+# two block this process (zero tokens burned) until the supervisor answers
+# through the answer_worker MCP tool, which drops a file in DELEGATE_COMM_DIR.
+
+
+def _ask_blocking(kind: str, message: str, context: str) -> str:
+    comm_dir = os.environ.get("DELEGATE_COMM_DIR")
+    if not comm_dir:
+        return (
+            "Supervisor channel unavailable in this run. Proceed autonomously with the most "
+            "conservative reasonable choice and record the open question in your final summary."
+        )
+    qid = uuid.uuid4().hex[:12]
+    emit_question({"id": qid, "kind": kind, "message": message[:2000], "context": context[:2000]})
+
+    answer_path = os.path.join(comm_dir, f"{qid}.json")
+    timeout_s = int(os.environ.get("DELEGATE_ASK_TIMEOUT_S", str(DEFAULT_ASK_TIMEOUT)))
+    waited = 0.0
+    while waited < timeout_s:
+        if os.path.isfile(answer_path):
+            try:
+                with open(answer_path, encoding="utf-8") as f:
+                    payload = json.load(f)
+                answer = payload.get("answer")
+            except (OSError, json.JSONDecodeError, ValueError):
+                answer = None
+            try:
+                os.remove(answer_path)
             except OSError:
                 pass
-PROGRESS_MARKER = "PROGRESS:"
+            if isinstance(answer, str) and answer:
+                emit_progress({"kind": "report", "note": "supervisor answered; resuming"})
+                return f"Supervisor answered: {answer}"
+        time.sleep(2)
+        waited += 2
+        if int(waited) % 30 == 0:
+            emit_progress({"kind": "waiting", "note": f"waiting for supervisor answer ({int(waited)}s)"})
+
+    emit_progress({"kind": "report", "note": "no supervisor answer; proceeding autonomously"})
+    return (
+        f"No supervisor answer within {timeout_s}s. Proceed with your best judgment: prefer the "
+        "most conservative choice, and record the open question in your final summary."
+    )
+
+
+def report_progress(update: str) -> str:
+    """Send a one-line progress update to the supervisor and the user's live dashboard.
+
+    Call this at every phase transition (starting implementation, tests
+    passing, refactoring, ...) and after completing each significant file.
+    It is fire-and-forget: execution continues immediately.
+
+    Args:
+        update: one short sentence, e.g. "implemented src/auth/tokens.js, moving to tests".
+    """
+    emit_progress({"kind": "report", "note": str(update)[:300]})
+    return "progress update delivered"
+
+
+def ask_supervisor(question: str, context: str = "") -> str:
+    """Ask the supervising agent a question and WAIT for its answer.
+
+    Use when the spec is ambiguous, two valid designs conflict, or a decision
+    belongs to the user (naming, API shape, dependency choice, destructive
+    change). Execution pauses until the supervisor replies (or a timeout
+    passes) — so batch related doubts into one question and keep working on
+    independent parts afterwards.
+
+    Args:
+        question: the decision you need, phrased so a yes/no or short answer unblocks you.
+        context: what you tried / the options you weighed, so the supervisor can decide fast.
+    """
+    return _ask_blocking("question", str(question), str(context))
+
+
+def report_blocker(problem: str, attempts: str = "") -> str:
+    """Report a blocker to the supervisor and WAIT for guidance.
+
+    Use after roughly three failed attempts at the SAME error (test that
+    won't pass, command that keeps failing, missing dependency) instead of
+    burning more attempts on it. The supervisor sees your problem and
+    attempts, and replies with guidance, a corrected command, or a decision.
+
+    Args:
+        problem: the exact error/blocker, with the key error line verbatim.
+        attempts: what you already tried, so the supervisor does not suggest it again.
+    """
+    return _ask_blocking("blocker", str(problem), str(attempts))
+
 
 # Substrings (case-insensitive) that mark an env var as a secret. Matched
 # against the uppercased name with ``in`` — so ``MY_API_KEY``,
@@ -109,7 +337,7 @@ def is_sensitive_env_name(name: str) -> bool:
 
 
 def build_shell_env(api_key_env_var: str) -> dict[str, str]:
-    """Return a copy of ``os.environ`` safe to hand to ``LocalShellBackend``.
+    """Return a copy of ``os.environ`` safe to hand to the shell backend.
 
     Drops anything that matches ``is_sensitive_env_name``, plus the well-known
     secret names ``DELEGATE_API_KEY`` and the provider-specific key env var
@@ -208,10 +436,17 @@ SUBAGENTS: list[SubAgent] = [
 
 SYSTEM_PROMPT = (
     "You are an autonomous coding worker delegated by a supervisor. "
-    "Work only inside the current working directory. "
+    "Work only inside the current working directory; never scan the filesystem or drive root "
+    "(no `find /`, no drive-wide searches) — everything you need is in the working directory. "
+    "Always use RELATIVE paths for file operations (src/app.js, not /abs/path or C:/...) — "
+    "absolute paths are remapped under the virtual root and your files land in the wrong place. "
     "Never run git push, merge, rebase onto other branches, or destructive commands. "
     "Use the implementer/tester/reviewer subagents when helpful. "
-    "Deliver a complete, tested change, then stop — the supervisor reviews and merges."
+    "Communicate upward while you work: call report_progress at each phase transition, "
+    "ask_supervisor when the spec is ambiguous or a decision belongs to the user, and "
+    "report_blocker after ~3 failed attempts at the same error instead of thrashing. "
+    "When the definition of done is met and the test command passes, write your final summary "
+    "and STOP — do not keep re-verifying. The supervisor reviews and merges."
 )
 
 
@@ -272,6 +507,8 @@ def main() -> int:
                     help="Provider-specific env var litellm expects for --model's provider prefix.")
     p.add_argument("--recursion-limit", type=int, default=400)
     p.add_argument("--rubric-max-iterations", type=int, default=6)
+    p.add_argument("--command-timeout", type=int, default=DEFAULT_COMMAND_TIMEOUT,
+                    help="Per-shell-command timeout in seconds (whole process tree killed on expiry).")
     args = p.parse_args()
 
     # DELEGATE_API_KEY is optional: OAuth-based providers (github_copilot,
@@ -280,27 +517,20 @@ def main() -> int:
     if api_key:
         os.environ[args.api_key_env_var] = api_key
 
-    # Filter the env before handing it to LocalShellBackend so the agent can't
+    # Filter the env before handing it to the shell backend so the agent can't
     # echo host secrets (DELEGATE_API_KEY, the provider key, GITHUB_TOKEN, ...)
     # back through a shell command. PATH / HOME / SystemRoot / TEMP survive so
     # node/npm/git still work. The Python process's own os.environ keeps the
     # provider key — litellm reads it from there.
     shell_env = build_shell_env(args.api_key_env_var)
-    backend_kwargs = dict(
+    backend = SupervisedShellBackend(
         root_dir=args.worktree,
         virtual_mode=True,
-        timeout=120,
+        timeout=args.command_timeout,
         inherit_env=False,
         env=shell_env,
+        bash_path=_find_bash() if os.name == "nt" else None,
     )
-    # On Windows, route shell commands through bash if available so the model's
-    # Unix-style commands work instead of failing against cmd.exe (see
-    # BashShellBackend). Elsewhere the default shell is already sh-compatible.
-    bash_path = _find_bash() if os.name == "nt" else None
-    if bash_path:
-        backend = BashShellBackend(bash_path=bash_path, **backend_kwargs)
-    else:
-        backend = LocalShellBackend(**backend_kwargs)
 
     # Register a litellm success callback to meter cost + tokens across every
     # model call in the run (main agent, subagents, rubric grader). Registered
@@ -314,6 +544,7 @@ def main() -> int:
     rubric_evaluations: list[dict] = []
     agent = create_deep_agent(
         model=args.model,
+        tools=[report_progress, ask_supervisor, report_blocker],
         backend=backend,
         system_prompt=SYSTEM_PROMPT,
         subagents=SUBAGENTS,
@@ -370,7 +601,7 @@ def main() -> int:
                 payload: dict[str, object] = {"step": step_counter, "node": node_name}
                 if note:
                     payload["note"] = note
-                print(PROGRESS_MARKER + json.dumps(payload), flush=True)
+                emit_progress(payload)
 
         messages = accumulated_messages
         result["turns"] = len(messages)

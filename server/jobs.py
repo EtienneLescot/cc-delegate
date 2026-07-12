@@ -48,6 +48,11 @@ def get_job(task_id: str) -> dict[str, Any] | None:
     return _jobs.get(task_id)
 
 
+def all_jobs() -> list[dict[str, Any]]:
+    """Snapshot of every job this server process knows about (dashboard feed)."""
+    return list(_jobs.values())
+
+
 def put_job(job: dict[str, Any]) -> None:
     _jobs[job["taskId"]] = job
 
@@ -104,6 +109,36 @@ def collect_diff(work_dir: str, repo: str, worktree: str, task_id: str) -> dict[
     patch_path.write_text(diff, encoding="utf-8")
     files_changed = [line.strip() for line in names.splitlines() if line.strip()]
     return {"patchPath": str(patch_path), "filesChanged": files_changed}
+
+
+def salvage_worktree(work_dir: str, job: dict[str, Any]) -> bool:
+    """Preserve a non-succeeded task's uncommitted work so nothing is lost.
+
+    Field lesson: a worker can finish the actual work and then die (recursion
+    overrun, timeout, cancel) before committing — leaving fetch_task_result
+    empty and the salvage entirely manual. This stages everything, writes the
+    patch file (same shape as a success), and best-effort commits a WIP
+    snapshot on the delegate branch. Returns True when there was anything to
+    salvage. Never raises.
+    """
+    try:
+        diff = collect_diff(work_dir, job["repo"], job["worktree"], job["taskId"])
+    except (subprocess.CalledProcessError, OSError, KeyError):
+        return False
+    if not diff.get("filesChanged"):
+        return False
+    job.update(diff)
+    try:
+        _git(
+            job["worktree"],
+            "-c", "user.name=cc-delegate",
+            "-c", "user.email=cc-delegate@localhost",
+            "commit", "-m",
+            f"wip(cc-delegate): salvage snapshot ({job.get('status', 'failed')})",
+        )
+    except subprocess.CalledProcessError:
+        pass  # staged + patch file already secure the work
+    return True
 
 
 def cleanup_job(work_dir: str, job: dict[str, Any], delete_branch: bool = True) -> dict[str, Any]:

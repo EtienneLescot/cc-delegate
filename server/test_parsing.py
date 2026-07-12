@@ -10,9 +10,33 @@ from jobs import new_task_id
 from persistence import (
     find_last_result_line,
     parse_progress_line,
+    parse_question_line,
     progress_note,
     strip_result_marker,
 )
+
+
+class TestQuestionLine(unittest.TestCase):
+    def test_valid_question(self):
+        line = 'QUESTION:{"id":"abc123","kind":"blocker","message":"tests keep failing","context":"tried x"}'
+        parsed = parse_question_line(line)
+        self.assertEqual(parsed["id"], "abc123")
+        self.assertEqual(parsed["kind"], "blocker")
+        self.assertEqual(parsed["message"], "tests keep failing")
+
+    def test_non_question_line(self):
+        self.assertIsNone(parse_question_line('PROGRESS:{"step":1}'))
+        self.assertIsNone(parse_question_line("plain text"))
+
+    def test_malformed_json(self):
+        self.assertIsNone(parse_question_line("QUESTION:{not json"))
+        self.assertIsNone(parse_question_line("QUESTION:[1,2]"))
+
+    def test_missing_required_fields(self):
+        self.assertIsNone(parse_question_line('QUESTION:{"id":"x"}'))
+        self.assertIsNone(parse_question_line('QUESTION:{"message":"no id"}'))
+        self.assertIsNone(parse_question_line('QUESTION:{"id":"","message":"y"}'))
+        self.assertIsNone(parse_question_line('QUESTION:{"id":123,"message":"y"}'))
 
 
 class TestResultLine(unittest.TestCase):

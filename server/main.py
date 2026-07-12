@@ -23,9 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mcp.server.fastmcp import FastMCP
 
 import config_store
+import events
 import oauth
+import preflight as preflight_mod
 from config import load_config
+from dashboard import start_dashboard
 from jobs import (
+    all_jobs,
     cleanup_job,
     create_worktree,
     get_job_with_fallback,
@@ -33,10 +37,18 @@ from jobs import (
     put_job,
     runtime,
 )
-from worker_launcher import run_worker
+from proc_utils import kill_tree
+from worker_launcher import comm_dir_for, run_worker
 
 cfg = load_config()
 mcp = FastMCP("cc-delegate")
+
+DASHBOARD_URL: str | None = None
+
+
+def _jobs_snapshot() -> list[dict[str, Any]]:
+    # workDir rides along so the dashboard can replay per-task event logs.
+    return [{**j, "workDir": cfg.work_dir} for j in all_jobs()]
 
 
 @mcp.tool(
@@ -77,6 +89,23 @@ async def run_dev_task(
     put_job(job)
     persist_job(job, cfg.work_dir)
 
+    # Preflight the acceptance gate BEFORE spending worker tokens: a broken
+    # test RUNNER (vs merely failing assertions) makes the rubric unpassable
+    # and sends the worker chasing phantom failures.
+    preflight_report: dict[str, Any] | None = None
+    if test_command:
+        # 60s cap: run_dev_task must return well within the MCP client's own
+        # tool timeout; a slow-but-legit test command shows up as advisory
+        # timed_out, never as a failed delegation start.
+        preflight_report = await asyncio.get_event_loop().run_in_executor(
+            None, preflight_mod.run_test_command, test_command, wt["worktree"], 60
+        )
+        events.publish(
+            wt["repo"], wt["taskId"],
+            {"kind": "preflight", "note": f"test_command exit={preflight_report.get('exit_code')}"},
+            cfg.work_dir,
+        )
+
     args = {
         "spec": spec,
         "worktree": wt["worktree"],
@@ -93,34 +122,93 @@ async def run_dev_task(
     task = asyncio.create_task(run_worker(cfg, job, args, timeout_ms or cfg.default_timeout_ms))
     runtime.setdefault(job["taskId"], {})["task"] = task
 
-    return json.dumps(
-        {
-            "task_id": wt["taskId"], "status": "running",
-            "branch": wt["branch"], "worktree": wt["worktree"],
-            "model": resolved["model"], "model_source": resolved["source"],
-        }
+    response: dict[str, Any] = {
+        "task_id": wt["taskId"], "status": "running",
+        "branch": wt["branch"], "worktree": wt["worktree"],
+        "model": resolved["model"], "model_source": resolved["source"],
+    }
+    if DASHBOARD_URL:
+        response["dashboard_url"] = DASHBOARD_URL
+        response["dashboard_hint"] = (
+            "share this URL with the user: it streams the worker's live activity "
+            "(every shell command, progress note, and question) in their browser at zero token cost"
+        )
+    if preflight_report is not None:
+        response["preflight"] = preflight_report
+        note = preflight_mod.preflight_note(preflight_report)
+        if note:
+            response["preflight_note"] = note
+    return json.dumps(response)
+
+
+def _status_payload(task_id: str, j: dict[str, Any]) -> dict[str, Any]:
+    import time as _time
+
+    payload: dict[str, Any] = {
+        "task_id": task_id,
+        "status": j.get("status"),
+        "progress": j.get("progress"),
+        "turns": j.get("turns", 0),
+        "cost_usd": j.get("costUsd"),
+        "total_tokens": j.get("totalTokens"),
+        "error": j.get("error"),
+    }
+    if j.get("startedAt"):
+        payload["elapsed_s"] = round(_time.time() - j["startedAt"])
+    if j.get("lastActivityTs"):
+        payload["last_activity_age_s"] = round(_time.time() - j["lastActivityTs"])
+    if j.get("question"):
+        payload["question"] = j["question"]
+        payload["action_required"] = (
+            "the worker is blocked on this question — reply with answer_worker(task_id, answer); "
+            "relay it to the user first if it is a product/user decision"
+        )
+    if j.get("salvaged"):
+        payload["salvaged"] = True
+    if DASHBOARD_URL:
+        payload["dashboard_url"] = DASHBOARD_URL
+    return payload
+
+
+def _status_fingerprint(j: dict[str, Any]) -> tuple:
+    return (
+        j.get("status"), j.get("progress"),
+        (j.get("question") or {}).get("id"), j.get("lastActivityTs"),
     )
 
 
-@mcp.tool(description="Returns current status, progress, cost and turns.")
-async def get_task_status(task_id: str) -> str:
+@mcp.tool(
+    description=(
+        "Returns current status, progress, cost and turns. Pass wait_seconds (recommended: 60-120) "
+        "to long-poll: the call returns EARLY on any change — new progress, completion, or the worker "
+        "asking a question (status 'needs_input'). Prefer one long-poll over many short polls."
+    )
+)
+async def get_task_status(task_id: str, wait_seconds: int = 0) -> str:
     j = get_job_with_fallback(task_id, cfg.work_dir)
     if not j:
         return json.dumps({"error": "unknown task_id"})
-    return json.dumps(
-        {
-            "task_id": task_id,
-            "status": j.get("status"),
-            "progress": j.get("progress"),
-            "turns": j.get("turns", 0),
-            "cost_usd": j.get("costUsd"),
-            "total_tokens": j.get("totalTokens"),
-            "error": j.get("error"),
-        }
+
+    live = j.get("taskId") in {job["taskId"] for job in all_jobs()}
+    wait = max(0, min(int(wait_seconds or 0), 300))
+    if wait and live and j.get("status") == "running":
+        # In-process job dicts mutate live; poll the fingerprint cheaply.
+        baseline = _status_fingerprint(j)
+        deadline = asyncio.get_event_loop().time() + wait
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            if _status_fingerprint(j) != baseline:
+                break
+    return json.dumps(_status_payload(task_id, j))
+
+
+@mcp.tool(
+    description=(
+        "Returns summary, patch, files changed, tests and cost of a finished task. Works for "
+        "non-succeeded tasks too: when 'salvaged' is true, the patch contains the worker's "
+        "uncommitted work preserved at failure/cancel time — review it before re-delegating."
     )
-
-
-@mcp.tool(description="Returns summary, patch, files changed, tests and cost of a completed task.")
+)
 async def fetch_task_result(task_id: str) -> str:
     j = get_job_with_fallback(task_id, cfg.work_dir)
     if not j:
@@ -138,9 +226,113 @@ async def fetch_task_result(task_id: str) -> str:
             "num_turns": j.get("turns", 0),
             "branch": j.get("branch"),
             "worktree": j.get("worktree"),
+            "salvaged": j.get("salvaged", False),
             "error": j.get("error"),
         }
     )
+
+
+@mcp.tool(
+    description=(
+        "Cancels a running task: kills the worker's whole process tree, salvages any uncommitted "
+        "work onto the delegate branch (fetch_task_result then returns the patch), and marks the "
+        "task 'cancelled' so cleanup_task can proceed. Use for stalled or runaway workers."
+    )
+)
+async def cancel_task(task_id: str) -> str:
+    j = get_job_with_fallback(task_id, cfg.work_dir)
+    if not j:
+        return json.dumps({"error": "unknown task_id"})
+    if j.get("status") != "running" and j.get("status") != "needs_input":
+        return json.dumps(
+            {"task_id": task_id, "error": f"task is not running (status: {j.get('status')})"}
+        )
+
+    rt = runtime.get(task_id) or {}
+    rt["cancelled"] = True
+    runtime[task_id] = rt
+
+    proc = rt.get("proc")
+    pid = getattr(proc, "pid", None) or j.get("workerPid")
+    if pid:
+        kill_tree(pid)
+
+    task = rt.get("task")
+    if task is not None:
+        # run_worker sees EOF, notices rt["cancelled"], finalizes as
+        # 'cancelled' and salvages — wait for that instead of racing it.
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=30)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        j = get_job_with_fallback(task_id, cfg.work_dir) or j
+    else:
+        # Job from a previous server process: no runtime handle. The tree
+        # kill above (via persisted workerPid) is all we can do; finalize
+        # the record directly.
+        from jobs import salvage_worktree
+
+        j["status"] = "cancelled"
+        j["error"] = "cancelled by supervisor (stale job from a previous server session)"
+        if salvage_worktree(cfg.work_dir, j):
+            j["salvaged"] = True
+        persist_job(j, cfg.work_dir)
+        events.publish(
+            j["repo"], task_id,
+            {"kind": "cancelled", "error": j["error"], "salvaged": j.get("salvaged", False)},
+            cfg.work_dir,
+        )
+
+    return json.dumps(
+        {
+            "task_id": task_id,
+            "status": j.get("status"),
+            "salvaged": j.get("salvaged", False),
+            "patch_path": j.get("patchPath"),
+            "note": "worktree and branch still exist; fetch_task_result for salvaged work, cleanup_task to discard",
+        }
+    )
+
+
+@mcp.tool(
+    description=(
+        "Answers a worker that is blocked in status 'needs_input' (it called ask_supervisor or "
+        "report_blocker). The answer is delivered out-of-band and the worker resumes immediately. "
+        "If the question is a product/user decision, relay it to the user before answering."
+    )
+)
+async def answer_worker(task_id: str, answer: str) -> str:
+    j = get_job_with_fallback(task_id, cfg.work_dir)
+    if not j:
+        return json.dumps({"error": "unknown task_id"})
+    question = j.get("question")
+    if j.get("status") != "needs_input" or not question:
+        return json.dumps(
+            {
+                "task_id": task_id,
+                "error": f"no pending question (status: {j.get('status')})",
+            }
+        )
+
+    comm_dir = comm_dir_for(j, cfg.work_dir)
+    try:
+        comm_dir.mkdir(parents=True, exist_ok=True)
+        answer_path = comm_dir / f"{question['id']}.json"
+        tmp_path = comm_dir / f"{question['id']}.json.tmp"
+        tmp_path.write_text(json.dumps({"answer": answer}), encoding="utf-8")
+        tmp_path.replace(answer_path)  # atomic: worker never reads a half-written file
+    except OSError as e:
+        return json.dumps({"task_id": task_id, "error": f"could not write answer: {e}"})
+
+    j["status"] = "running"
+    j["lastQuestion"] = j.pop("question")
+    persist_job(j, cfg.work_dir)
+    events.publish(
+        j["repo"], task_id,
+        {"kind": "answer", "question_id": question["id"], "answer": answer[:300]},
+        cfg.work_dir,
+    )
+    return json.dumps({"task_id": task_id, "delivered": True, "question_id": question["id"]})
 
 
 @mcp.tool(description="Removes the worktree, branch, and persisted file for a finished task.")
@@ -357,4 +549,11 @@ async def auth_poll(flow_id: str) -> str:
 
 
 if __name__ == "__main__":
+    # Live dashboard (SSE over localhost): the user watches worker activity
+    # in a browser while the supervisor stays token-idle. Best-effort — a
+    # bind failure must never take the MCP server down with it.
+    try:
+        DASHBOARD_URL = start_dashboard(_jobs_snapshot)
+    except Exception:  # noqa: BLE001
+        DASHBOARD_URL = None
     mcp.run()

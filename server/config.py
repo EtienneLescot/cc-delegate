@@ -18,6 +18,7 @@ class Config:
     default_max_budget_usd: float
     default_timeout_ms: int
     work_dir: str
+    command_timeout_s: int
 
 
 def load_config() -> Config:
@@ -35,4 +36,8 @@ def load_config() -> Config:
         default_max_budget_usd=float(os.environ.get("DELEGATE_MAX_BUDGET_USD", "5")),
         default_timeout_ms=int(os.environ.get("DELEGATE_TIMEOUT_MS", "1800000")),
         work_dir=os.environ.get("DELEGATE_WORK_DIR", ".cc-delegate"),
+        # Per-shell-command budget inside the worker. One stuck command
+        # (e.g. a whole-drive find) must cost at most this, not the whole
+        # task timeout.
+        command_timeout_s=int(os.environ.get("DELEGATE_CMD_TIMEOUT_S", "120")),
     )

@@ -18,6 +18,7 @@ from typing import Any
 
 RESULT_MARKER = "RESULT_JSON:"
 PROGRESS_MARKER = "PROGRESS:"
+QUESTION_MARKER = "QUESTION:"
 
 DEFAULT_WORK_DIR = ".cc-delegate"
 
@@ -48,6 +49,28 @@ def parse_progress_line(line: str) -> dict[str, Any] | None:
     except (json.JSONDecodeError, ValueError):
         return None
     if not isinstance(obj, dict):
+        return None
+    return obj
+
+
+def parse_question_line(line: str) -> dict[str, Any] | None:
+    """Parsed payload of a QUESTION: line, or None.
+
+    A valid question carries at least a string ``id`` and a string
+    ``message``; anything else is treated as noise, mirroring
+    parse_progress_line's never-raise contract.
+    """
+    if not line.startswith(QUESTION_MARKER):
+        return None
+    try:
+        obj = json.loads(line[len(QUESTION_MARKER):])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if not isinstance(obj.get("id"), str) or not obj["id"]:
+        return None
+    if not isinstance(obj.get("message"), str) or not obj["message"]:
         return None
     return obj
 

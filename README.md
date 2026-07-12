@@ -11,7 +11,7 @@ The supervisor stays on Anthropic; only the worker is billed on the alternate pr
 ```mermaid
 flowchart LR
   Supervisor["Claude Code supervisor<br/>(Anthropic API)"]
-  MCP["cc-delegate MCP server<br/>Python (uv run server/main.py), stdio<br/>4 tools: run_dev_task,<br/>get_task_status, fetch_task_result,<br/>cleanup_task"]
+  MCP["cc-delegate MCP server<br/>Python (uv run server/main.py), stdio<br/>run_dev_task, get_task_status,<br/>answer_worker, cancel_task,<br/>fetch_task_result, cleanup_task<br/>+ SSE dashboard :45673"]
   Worktree["Disposable git worktree<br/>branch delegate/&lt;task_id&gt;"]
   Worker["uv run worker/worker.py<br/>deepagents loop<br/>+ implementer / tester / reviewer subagents<br/>+ rubric grader"]
   Provider["Provider<br/>(litellm-routed,<br/>e.g. MiniMax M3)"]
@@ -29,11 +29,14 @@ flowchart LR
 ```
 
 - **`cc-delegate` MCP server** (`server/main.py`, official `mcp` Python SDK, run via
-  `uv run`) — exposes four tools to the supervisor over stdio: `run_dev_task` (start a
-  delegated task and return a `task_id`), `get_task_status` (poll — reflects live `PROGRESS:`
-  updates as the worker streams them), `fetch_task_result` (read the final summary, patch,
-  files changed, cost, and tokens), and `cleanup_task` (tear down a finished task's worktree,
-  branch, and persisted job file).
+  `uv run`) — exposes the delegation tools to the supervisor over stdio: `run_dev_task` (start
+  a delegated task — preflights your `test_command` first — and return a `task_id`),
+  `get_task_status` (long-poll with `wait_seconds`; returns early on progress, completion, or
+  a worker question), `answer_worker` (reply to a worker blocked on a question),
+  `cancel_task` (kill a stalled/runaway worker's whole process tree, salvaging its work),
+  `fetch_task_result` (final summary, patch, files changed, cost — including salvaged work
+  from failed runs), and `cleanup_task` (tear down a finished task's worktree, branch, and
+  persisted job file).
 - **Job persistence** — every job is mirrored to `<repo>/.cc-delegate/jobs/<task_id>.json` on
   each state change, so `get_task_status` / `fetch_task_result` / `cleanup_task` still work
   across MCP-server restarts: the in-memory registry is rebuilt from disk on demand.
@@ -48,6 +51,38 @@ flowchart LR
   shows what the worker is doing without waiting for completion.
 - **Packaged skill** (`skills/delegate-heavy-dev/SKILL.md`) — teaches the supervisor when and
   how to delegate.
+
+## Live dashboard — watch the worker without burning tokens
+
+Polling a running delegation through the supervisor costs supervisor tokens; waiting blind is
+frustrating. The MCP server therefore serves a local **live dashboard** at
+`http://127.0.0.1:45673` (falls back to an ephemeral port if busy; the actual URL is included
+in every `run_dev_task` / `get_task_status` response and written to
+`~/.cc-delegate/dashboard.json`).
+
+Open it in a browser and you see, streamed over SSE in real time: every shell command the
+worker runs, its progress reports, questions it asks, and the final verdict with cost — for
+every task of the session. The supervisor only needs `get_task_status` at decision points;
+your eyes do the monitoring for free. Disable with `DELEGATE_DASHBOARD=0`, pin the port with
+`DELEGATE_DASHBOARD_PORT`. Everything stays on 127.0.0.1.
+
+## Worker → supervisor communication
+
+The worker is not fire-and-forget anymore. Three tools are injected into its agent loop:
+
+- **`report_progress(update)`** — fire-and-forget one-liners at phase transitions; they feed
+  `get_task_status` and the dashboard.
+- **`ask_supervisor(question, context)`** — blocks the worker (zero tokens spent while
+  waiting) and flips the task to status `needs_input`. The supervisor sees the question in
+  `get_task_status` (a long-poll returns early), optionally relays it to you, and replies with
+  `answer_worker(task_id, answer)`; the worker resumes with the answer.
+- **`report_blocker(problem, attempts)`** — same mechanism, for "I've failed 3 times at the
+  same error" situations: the supervisor gets a chance to correct course instead of the worker
+  thrashing until timeout.
+
+Answers travel out-of-band through a file mailbox in `<repo>/.cc-delegate/comm/<task_id>/` —
+never through the model conversation. If no answer arrives within `DELEGATE_ASK_TIMEOUT_S`
+(default 600s), the worker resumes with its best conservative judgment.
 
 We started with the worker calling `@anthropic-ai/claude-agent-sdk`'s `query()` pointed at a
 third-party endpoint, then tried shelling out to CLI coding agents (OpenCode, `dcode`) — both hit
@@ -113,7 +148,7 @@ uv run python -m unittest discover -s server -p "test_*.py"
 
 ## Verify
 
-- `/mcp` should list the `cc-delegate` server and its four tools.
+- `/mcp` should list the `cc-delegate` server and its tools.
 - `/status` in the supervisor session should still show `api.anthropic.com` — no worker
   config ever leaks into the supervisor process.
 - Ask the supervisor to delegate a heavy task; it should call `run_dev_task`, poll

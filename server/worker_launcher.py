@@ -1,30 +1,46 @@
 """Spawns the deepagents worker and folds its stdout into the job.
 
-Mirror of src/worker.ts: `uv run worker/worker.py ...` as a subprocess,
-consuming stdout line-by-line as it arrives — each PROGRESS: line refreshes
-job["progress"] (persisted so get_task_status sees it live), the final
-RESULT_JSON: line decides success/failure, and a hard timeout kills the
-subprocess and marks the job failed.
+`uv run worker/worker.py ...` as a subprocess, consuming stdout line-by-line
+as it arrives:
+
+- ``PROGRESS:`` lines refresh job["progress"] + lastActivityTs (persisted so
+  get_task_status sees them live) and feed the event bus (SSE dashboard);
+- ``QUESTION:`` lines flip the job to ``needs_input`` — the worker is then
+  blocked waiting for answer_worker to drop a file in the comm dir;
+- the final ``RESULT_JSON:`` line decides success/failure;
+- a hard timeout (and cancel_task) kills the whole process TREE — killing
+  only the direct child leaves grandchildren holding the stdout pipe, which
+  is how a stuck command once froze a delegation for 20+ minutes;
+- any non-succeeded ending triggers a salvage pass so completed-but-
+  uncommitted work still reaches fetch_task_result.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 from config import Config
-from jobs import collect_diff, persist_job, runtime
+from events import publish
+from jobs import collect_diff, persist_job, runtime, salvage_worktree
 from persistence import (
     find_last_result_line,
     parse_progress_line,
+    parse_question_line,
     progress_note,
     strip_result_marker,
 )
-import json
+from proc_utils import kill_tree
 
 WORKER_SCRIPT = str(Path(__file__).resolve().parent.parent / "worker" / "worker.py")
+
+
+def comm_dir_for(job: dict[str, Any], work_dir: str) -> Path:
+    return Path(job["repo"]) / work_dir / "comm" / job["taskId"]
 
 
 def _build_args(cfg: Config, args: dict[str, Any]) -> list[str]:
@@ -38,6 +54,7 @@ def _build_args(cfg: Config, args: dict[str, Any]) -> list[str]:
         "--api-key-env-var", args.get("api_key_env_var") or cfg.api_key_env_var,
         "--recursion-limit", str(args["recursion_limit"]),
         "--rubric-max-iterations", str(args["rubric_max_iterations"]),
+        "--command-timeout", str(cfg.command_timeout_s),
     ]
     if args.get("definition_of_done"):
         cli += ["--definition-of-done", args["definition_of_done"]]
@@ -58,6 +75,21 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
     else:
         env.pop("DELEGATE_API_KEY", None)
 
+    # Mailbox for supervisor answers to worker questions (ask_supervisor /
+    # report_blocker). The worker polls files here while blocked.
+    comm_dir = comm_dir_for(job, cfg.work_dir)
+    comm_dir.mkdir(parents=True, exist_ok=True)
+    env["DELEGATE_COMM_DIR"] = str(comm_dir)
+
+    def _publish(event: dict[str, Any]) -> None:
+        publish(job["repo"], job["taskId"], event, cfg.work_dir)
+
+    def _touch(note: str | None = None) -> None:
+        job["lastActivityTs"] = time.time()
+        if note:
+            job["progress"] = note
+        persist_job(job, cfg.work_dir)
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "uv", *_build_args(cfg, args),
@@ -67,6 +99,7 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
+            start_new_session=(os.name != "nt"),
         )
     except FileNotFoundError:
         job["status"] = "failed"
@@ -75,10 +108,15 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
             "(https://docs.astral.sh/uv/getting-started/installation/)."
         )
         persist_job(job, cfg.work_dir)
+        _publish({"kind": "failed", "error": job["error"]})
         return
 
     rt = runtime.setdefault(job["taskId"], {})
     rt["proc"] = proc
+    job["workerPid"] = proc.pid
+    job["startedAt"] = time.time()
+    _touch("worker starting")
+    _publish({"kind": "started", "model": args.get("model") or cfg.model, "pid": proc.pid})
 
     result_line: str | None = None
     tail_lines: list[str] = []
@@ -94,52 +132,70 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
             if line.startswith("RESULT_JSON:"):
                 result_line = line
                 continue
+            question = parse_question_line(line)
+            if question:
+                job["status"] = "needs_input"
+                job["question"] = {**question, "askedAt": time.time()}
+                _touch(f"worker asks: {question['message'][:120]}")
+                _publish({"kind": question.get("kind", "question"), **question})
+                continue
             progress = parse_progress_line(line)
             if progress:
-                job["progress"] = progress_note(progress)
-                persist_job(job, cfg.work_dir)
+                _touch(progress_note(progress))
+                _publish({"kind": progress.get("kind", "progress"), **progress})
         await proc.wait()
+
+    def _finalize_failure(error: str, kind: str = "failed") -> None:
+        job["status"] = "cancelled" if rt.get("cancelled") else "failed"
+        job["error"] = "cancelled by supervisor" if rt.get("cancelled") else error
+        job.pop("question", None)
+        if salvage_worktree(cfg.work_dir, job):
+            job["salvaged"] = True
+        persist_job(job, cfg.work_dir)
+        _publish({
+            "kind": "cancelled" if rt.get("cancelled") else kind,
+            "error": job["error"], "salvaged": job.get("salvaged", False),
+        })
 
     try:
         await asyncio.wait_for(consume(), timeout=timeout_ms / 1000)
     except asyncio.TimeoutError:
-        proc.kill()
-        job["status"] = "failed"
-        job["error"] = f"worker timed out after {timeout_ms} ms"
-        persist_job(job, cfg.work_dir)
+        kill_tree(proc.pid)
+        _finalize_failure(f"worker timed out after {timeout_ms} ms", kind="timeout")
         return
     except Exception as e:  # noqa: BLE001 - any launcher failure becomes a job failure
-        proc.kill()
-        job["status"] = "failed"
-        job["error"] = f"{type(e).__name__}: {e}"
-        persist_job(job, cfg.work_dir)
+        kill_tree(proc.pid)
+        _finalize_failure(f"{type(e).__name__}: {e}")
         return
 
     final_line = result_line or find_last_result_line("\n".join(tail_lines))
     if not final_line:
-        job["status"] = "failed"
-        job["error"] = "worker produced no result line; last stdout: " + "\n".join(tail_lines[-10:])
-        persist_job(job, cfg.work_dir)
+        _finalize_failure(
+            "worker produced no result line; last stdout: " + "\n".join(tail_lines[-10:])
+        )
         return
 
     try:
         result = json.loads(strip_result_marker(final_line))
     except (json.JSONDecodeError, ValueError) as e:
-        job["status"] = "failed"
-        job["error"] = f"unparseable RESULT_JSON line: {e}"
-        persist_job(job, cfg.work_dir)
+        _finalize_failure(f"unparseable RESULT_JSON line: {e}")
         return
 
     job["turns"] = result.get("turns", 0)
     job["summary"] = result.get("summary")
     job["costUsd"] = result.get("cost_usd")
     job["totalTokens"] = result.get("total_tokens")
+    job.pop("question", None)
 
-    if result.get("status") == "succeeded":
+    if result.get("status") == "succeeded" and not rt.get("cancelled"):
         diff = collect_diff(cfg.work_dir, job["repo"], job["worktree"], job["taskId"])
         job.update(diff)
         job["status"] = "succeeded"
+        persist_job(job, cfg.work_dir)
+        _publish({
+            "kind": "succeeded",
+            "files_changed": len(job.get("filesChanged", [])),
+            "cost_usd": job.get("costUsd"),
+        })
     else:
-        job["status"] = "failed"
-        job["error"] = result.get("error") or "worker reported failure"
-    persist_job(job, cfg.work_dir)
+        _finalize_failure(result.get("error") or "worker reported failure")
