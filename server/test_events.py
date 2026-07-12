@@ -62,5 +62,31 @@ class TestEventBus(unittest.TestCase):
         self.assertEqual(events.read_log(self.repo, "t_nope", ".cc-delegate"), [])
 
 
+class TestEventMessage(unittest.TestCase):
+    def test_shell(self):
+        self.assertEqual(events.event_message({"kind": "shell", "command": "npm test"}), "$ npm test")
+
+    def test_question_and_blocker(self):
+        self.assertIn("token TTL", events.event_message(
+            {"kind": "question", "message": "which token TTL?"}))
+        self.assertTrue(events.event_message({"kind": "blocker", "message": "x"}).startswith("❓"))
+
+    def test_terminal_states(self):
+        self.assertIn("✓ done", events.event_message(
+            {"kind": "succeeded", "files_changed": 4, "cost_usd": 0.24}))
+        self.assertIn("4 files", events.event_message(
+            {"kind": "succeeded", "files_changed": 4}))
+        self.assertTrue(events.event_message({"kind": "failed", "error": "boom"}).startswith("✗"))
+        self.assertTrue(events.event_message({"kind": "cancelled"}).startswith("⊘"))
+
+    def test_started_with_model(self):
+        self.assertIn("MiniMax-M3", events.event_message(
+            {"kind": "started", "model": "MiniMax-M3"}))
+
+    def test_progress_fallback_and_truncation(self):
+        self.assertEqual(events.event_message({"kind": "progress", "note": "hello"}), "hello")
+        self.assertLessEqual(len(events.event_message({"kind": "progress", "note": "x" * 500})), 160)
+
+
 if __name__ == "__main__":
     unittest.main()

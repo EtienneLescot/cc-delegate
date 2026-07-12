@@ -49,7 +49,7 @@ def get_job(task_id: str) -> dict[str, Any] | None:
 
 
 def all_jobs() -> list[dict[str, Any]]:
-    """Snapshot of every job this server process knows about (dashboard feed)."""
+    """Snapshot of every job live in this server process (liveness checks)."""
     return list(_jobs.values())
 
 

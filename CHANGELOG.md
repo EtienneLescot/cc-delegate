@@ -3,6 +3,42 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.6.0
+
+Watch mode — the delegation streams live *inside the chat*, like a Bash command. Works
+identically in the TUI and the desktop app. Replaces the browser dashboard.
+
+### Added
+
+- **`run_dev_task` watch mode (default `watch=True`).** The call now BLOCKS and relays the
+  worker's activity as MCP **progress notifications** — every shell command, progress note and
+  question shows live on the tool call in the chat, exactly where a Bash tool streams its output,
+  on both the TUI and desktop app, at **zero supervisor-token cost** (progress notifications
+  bypass the model). It returns when the task finishes OR the worker asks a question.
+- **Supervisor keeps question discretion.** On a worker question the watch call RETURNS control
+  to the supervisor (it does not pop a user dialog). The supervisor decides at its discretion —
+  answer from its own context with `answer_worker`, or relay to the user when it is genuinely a
+  user decision — then calls **`watch_task(task_id)`** to resume the live stream. A question is
+  the one point that costs a supervisor turn, which is exactly where judgment is needed.
+- **`watch_task(task_id)`.** Attach (or re-attach after answering) to a running task and stream
+  it live until the next pause. Also lets you watch a task that was started with `watch=False`.
+- **`watch=False` fire-and-forget** is still available for running several delegations in
+  parallel; pair it with `get_task_status(wait_seconds=…)` or `watch_task`.
+
+### Removed
+
+- **The SSE browser dashboard** (`server/dashboard.py`, `DELEGATE_DASHBOARD*` env vars). Watch
+  mode puts the same live feed *inside* Claude Code, so the separate localhost tab — never well
+  integrated, and invisible in the desktop app's native UI — is gone. The internal event bus and
+  per-task `.jsonl` logs remain: they now feed the watch stream and post-mortems.
+
+### Notes
+
+- The status line (0.5.0) stays as the always-visible ambient indicator; watch mode is the
+  in-chat, blow-by-blow view. Together they cover TUI and desktop without a browser.
+- Progress notifications degrade gracefully: on a client that sends no `progressToken`, the watch
+  call still blocks and returns the result — it just shows no intermediate lines.
+
 ## 0.5.0
 
 Native status-line integration — live progress *inside* Claude Code, not in a separate tab.

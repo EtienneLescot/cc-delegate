@@ -4,9 +4,9 @@ Every noteworthy moment of a delegation (launch, shell command, progress
 note, question, answer, terminal state) is published here. Two consumers:
 
 - the per-task log file ``<repo>/<work_dir>/logs/<task_id>.jsonl`` — the
-  durable trace, readable after the fact;
-- live subscribers (the SSE dashboard) via bounded queues — a slow or dead
-  subscriber loses events rather than blocking the publisher.
+  durable trace, readable after the fact and for post-mortems;
+- live subscribers (watch mode's progress stream) via bounded queues — a slow
+  or dead subscriber loses events rather than blocking the publisher.
 
 Stdlib-only so unit tests run without any dependency install.
 """
@@ -60,6 +60,36 @@ def publish(repo: str, task_id: str, event: dict[str, Any], work_dir: str) -> di
         except queue.Full:
             pass
     return stamped
+
+
+def event_message(ev: dict[str, Any]) -> str:
+    """One-line human summary of an event, for MCP progress notifications.
+
+    Pure so it stays unit-testable without a live server. Mirrors the labels
+    the supervisor and user see while watching a delegation stream.
+    """
+    kind = ev.get("kind", "progress")
+    if kind == "shell" and ev.get("command"):
+        return "$ " + str(ev["command"])[:160]
+    if kind in ("question", "blocker"):
+        return "❓ " + str(ev.get("message") or "worker needs input")[:160]
+    if kind == "answer":
+        return "↩ supervisor answered"
+    if kind == "started":
+        return "worker started" + (f" · {ev['model']}" if ev.get("model") else "")
+    if kind == "preflight":
+        return "preflight: " + str(ev.get("note") or "")
+    if kind == "succeeded":
+        n = ev.get("files_changed")
+        cost = ev.get("cost_usd")
+        tail = (f" · {n} file{'s' if n != 1 else ''}" if n else "") + (
+            f" · ${cost:.2f}" if isinstance(cost, (int, float)) else "")
+        return "✓ done" + tail
+    if kind in ("failed", "timeout"):
+        return f"✗ {kind} · " + str(ev.get("error") or "")[:120]
+    if kind == "cancelled":
+        return "⊘ " + str(ev.get("error") or "cancelled")[:120]
+    return str(ev.get("note") or kind)[:160]
 
 
 def read_log(repo: str, task_id: str, work_dir: str, limit: int = 200) -> list[dict[str, Any]]:

@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-# ANSI — kept in sync with the dashboard's status colors.
+# ANSI status colors.
 _RESET = "\033[0m"
 _CYAN = "\033[36m"
 _YELLOW = "\033[33m"

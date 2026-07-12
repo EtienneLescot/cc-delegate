@@ -21,32 +21,28 @@ provider works).
    `definition_of_done`, and the `test_command` to validate. These two fields double as the
    worker's rubric — the more precise they are, the more reliably the worker recognizes when
    it's actually done instead of stopping early or over-iterating.
-2. **Delegate.** Call `run_dev_task` with `spec`, the absolute `repo_path`, `test_command`,
-   `definition_of_done`, and (optionally) `recursion_limit` for unusually large tasks. It returns
-   a `task_id` — plus two fields to act on immediately:
-   - **`preflight`**: the server ran your `test_command` once in the fresh worktree. A non-zero
-     exit is often normal (tests target code that doesn't exist yet), but READ `output_tail`:
-     if the *runner itself* is broken (module/file not found on the test path, unknown option),
-     the acceptance gate is unpassable — cancel, fix `test_command`, re-delegate. Never let the
-     worker fight a broken gate.
-   - **`dashboard_url`**: give it to the user right away — it streams the worker's live
-     activity (every shell command, progress note, question) in their browser at zero token
-     cost. If they have the **status line** configured, the active task also shows live in
-     Claude Code's own status bar (also token-free). With either in the user's hands, you don't
-     need to poll for *their* sake.
-3. **Supervise with long-polls, not timers.** Call `get_task_status(task_id, wait_seconds=120)`
-   in a loop: it returns EARLY on any change (progress, completion, question). Watch two fields:
-   - `status == "needs_input"`: the worker is blocked on the included `question`. If it's a
-     product/user decision, relay it to the user; otherwise answer from your own context. Reply
-     with `answer_worker(task_id, answer)` — the worker resumes instantly.
-   - `last_activity_age_s` climbing past several minutes with no progress change: the worker
-     may be stuck. Per-command timeouts bound most hangs, but if it stays frozen, call
-     `cancel_task(task_id)` — it kills the whole process tree and salvages uncommitted work.
-4. **Review.** When status is `succeeded`, call `fetch_task_result(task_id)`. Read the `summary`,
-   open the `patch_path` diff, and check `files_changed` and `tests`. On `failed` / `timeout` /
-   `cancelled`, check `salvaged`: if true, the patch contains the worker's uncommitted work —
-   review it BEFORE re-delegating; often the work is nearly complete (e.g. the run only
-   overran its step budget after finishing).
+2. **Delegate (watch mode is the default).** Call `run_dev_task` with `spec`, the absolute
+   `repo_path`, `test_command`, `definition_of_done`, and (optionally) `recursion_limit`. By
+   default (`watch=True`) the call BLOCKS and streams the worker's activity live into the chat —
+   every shell command and progress note — at zero token cost, exactly like a Bash tool's output.
+   It returns when the task finishes OR the worker asks a question. Check **`preflight`** in the
+   return: a non-zero exit is often normal (tests target code that doesn't exist yet), but read
+   `output_tail` — if the *runner itself* is broken (module/file not found, unknown option), the
+   gate is unpassable, so fix `test_command` and re-delegate rather than letting the worker fight
+   it. (Run several delegations at once instead with `watch=False` — it returns a `task_id` and
+   you supervise via `get_task_status(wait_seconds=…)` or `watch_task`.)
+3. **When watch mode returns on a question** (`status == "needs_input"`): the worker is blocked on
+   the included `question`. **You decide, at your discretion** — answer from your own context with
+   `answer_worker(task_id, answer)` when it's within your knowledge, or relay it to the user first
+   when it's genuinely a product/user decision (naming, API shape, a destructive change, a
+   trade-off only they can settle). After answering, call **`watch_task(task_id)`** to resume the
+   live stream. Repeat until the task reaches a terminal state.
+4. **Review.** When the watch returns terminal `succeeded`, the payload already carries
+   `patch_path`, `files_changed`, `cost_usd`, and `summary` (or call `fetch_task_result`). Open
+   the diff and read it. On `failed` / `timeout` / `cancelled`, check `salvaged`: if true, the
+   patch contains the worker's uncommitted work — review it BEFORE re-delegating; often it's
+   nearly complete (e.g. the run only overran its step budget after finishing). To stop a stalled
+   or runaway worker, `cancel_task(task_id)` kills the whole process tree and salvages its work.
 5. **Decide.** Present the diff to the user. You (with the user) decide whether to merge branch
    `delegate/<task_id>`. The worker never pushes or merges.
 
@@ -91,7 +87,9 @@ returns a verification URL and user code — relay both to the user verbatim, th
   skeletons in the spec or should stay with you.
 - Verify the `preflight` report before trusting a run: a broken test RUNNER (vs failing
   assertions) makes the rubric unpassable and must be fixed before delegating.
-- Prefer one `get_task_status(wait_seconds=120)` long-poll over many short polls, and share
-  `dashboard_url` with the user so live monitoring costs zero tokens.
-- Answer `needs_input` promptly — the worker is blocked (token-free, but wall-clock stalls);
-  relay user-level decisions to the user rather than guessing.
+- Prefer watch mode (the default): it streams the run into the chat token-free and returns you
+  control exactly at questions and completion. Use `watch=False` + `get_task_status(wait_seconds=…)`
+  only when running several delegations in parallel.
+- Answer `needs_input` at your discretion — answer yourself when it's within your context, relay
+  genuine user decisions to the user. The worker is blocked (token-free, but wall-clock stalls),
+  so don't leave it waiting.

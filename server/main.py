@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 import config_store
 import events
@@ -28,7 +29,6 @@ import oauth
 import preflight as preflight_mod
 import statusline_render
 from config import load_config
-from dashboard import start_dashboard
 from jobs import (
     all_jobs,
     cleanup_job,
@@ -44,29 +44,111 @@ from worker_launcher import comm_dir_for, run_worker
 cfg = load_config()
 mcp = FastMCP("cc-delegate")
 
-DASHBOARD_URL: str | None = None
+TERMINAL_STATES = {"succeeded", "failed", "timeout", "cancelled"}
 
 
-def _jobs_snapshot() -> list[dict[str, Any]]:
-    # workDir rides along so the dashboard can replay per-task event logs.
-    return [{**j, "workDir": cfg.work_dir} for j in all_jobs()]
+async def _stream_until_pause(ctx: Context, task_id: str) -> dict[str, Any]:
+    """Block, relaying the worker's events as MCP progress notifications, until
+    the task reaches a terminal state OR blocks on a question (needs_input).
+
+    This is what makes a delegation show live *inside* Claude Code — the same
+    place a Bash tool streams its output — on both the TUI and the desktop app,
+    at zero supervisor-token cost (progress notifications bypass the model).
+    Returns the (mutated, live) job dict at the pause point.
+
+    report_progress no-ops when the client sends no progressToken, so the call
+    still works (it just blocks and returns the result) on clients that don't
+    render progress — graceful degradation.
+    """
+    q = events.subscribe()
+    counter = 0
+    try:
+        # Seed one line immediately so the tool shows activity right away.
+        j = get_job_with_fallback(task_id, cfg.work_dir)
+        if j and j.get("progress"):
+            counter += 1
+            await _safe_progress(ctx, counter, j["progress"])
+        while True:
+            while True:
+                try:
+                    ev = q.get_nowait()
+                except queue.Empty:
+                    break
+                if ev.get("task_id") != task_id:
+                    continue
+                counter += 1
+                await _safe_progress(ctx, ev.get("step") or counter, events.event_message(ev))
+            j = get_job_with_fallback(task_id, cfg.work_dir)
+            status = j.get("status") if j else None
+            if status == "needs_input" or status in TERMINAL_STATES:
+                return j or {}
+            await asyncio.sleep(0.4)
+    finally:
+        events.unsubscribe(q)
+
+
+async def _safe_progress(ctx: Context, progress: float, message: str) -> None:
+    try:
+        await ctx.report_progress(progress=progress, total=None, message=message)
+    except Exception:  # noqa: BLE001 - progress is advisory; never break the run over it
+        pass
+
+
+def _watch_return(task_id: str, j: dict[str, Any]) -> dict[str, Any]:
+    """Shape the payload handed back to the supervisor when a watch pauses."""
+    status = j.get("status")
+    if status == "needs_input":
+        return {
+            "task_id": task_id,
+            "status": "needs_input",
+            "question": j.get("question"),
+            "action_required": (
+                "the worker is blocked on this question. Decide at your discretion: answer it "
+                "yourself with answer_worker(task_id, answer) when it is within your context, or "
+                "relay it to the user first when it is genuinely a product/user decision. Then call "
+                "watch_task(task_id) to resume the live stream."
+            ),
+        }
+    # terminal
+    return {
+        "task_id": task_id,
+        "status": status,
+        "summary": j.get("summary"),
+        "patch_path": j.get("patchPath"),
+        "files_changed": j.get("filesChanged", []),
+        "cost_usd": j.get("costUsd"),
+        "total_tokens": j.get("totalTokens"),
+        "num_turns": j.get("turns", 0),
+        "branch": j.get("branch"),
+        "worktree": j.get("worktree"),
+        "salvaged": j.get("salvaged", False),
+        "error": j.get("error"),
+        "next": "review the diff at patch_path, then decide with the user whether to merge the branch",
+    }
 
 
 @mcp.tool(
     description=(
         "Starts an autonomous coding worker on an isolated git worktree. "
-        "Returns a task_id immediately; poll with get_task_status, then fetch_task_result."
+        "By default (watch=True) it BLOCKS and streams the worker's live activity as progress "
+        "notifications — the delegation shows in the chat like a Bash command's output, on both "
+        "the TUI and desktop app, at zero token cost — returning when the task finishes OR the "
+        "worker asks a question (status 'needs_input'). On a question, answer with answer_worker "
+        "then resume with watch_task. Set watch=False for fire-and-forget: it returns a task_id "
+        "immediately and you poll with get_task_status (use this to run several tasks in parallel)."
     )
 )
 async def run_dev_task(
     spec: str,
     repo_path: str,
+    ctx: Context,
     test_command: str | None = None,
     definition_of_done: str | None = None,
     base_branch: str | None = None,
     recursion_limit: int | None = None,
     timeout_ms: int | None = None,
     profile: str | None = None,
+    watch: bool = True,
 ) -> str:
     # Resolve model/key per task from the config store (facade profiles),
     # falling back to legacy env config. Read fresh each call so facade
@@ -86,7 +168,7 @@ async def run_dev_task(
         "turns": 0,
         "costUsd": None,
         "totalTokens": None,
-        "model": resolved["model"],  # for the status line / dashboard
+        "model": resolved["model"],  # for the status line / watch stream
     }
     put_job(job)
     persist_job(job, cfg.work_dir)
@@ -120,28 +202,36 @@ async def run_dev_task(
         "api_key_env_var": resolved["api_key_env_var"],
         "api_key": resolved["api_key"],
     }
-    # Fire-and-forget: the worker runs in the background; job state is
-    # updated live by worker_launcher via persist_job on every change.
+    # The worker runs as a background asyncio task; job state is mutated live
+    # by worker_launcher (same event loop) and mirrored to disk on every change.
     task = asyncio.create_task(run_worker(cfg, job, args, timeout_ms or cfg.default_timeout_ms))
     runtime.setdefault(job["taskId"], {})["task"] = task
 
-    response: dict[str, Any] = {
-        "task_id": wt["taskId"], "status": "running",
-        "branch": wt["branch"], "worktree": wt["worktree"],
-        "model": resolved["model"], "model_source": resolved["source"],
-    }
-    if DASHBOARD_URL:
-        response["dashboard_url"] = DASHBOARD_URL
-        response["dashboard_hint"] = (
-            "share this URL with the user: it streams the worker's live activity "
-            "(every shell command, progress note, and question) in their browser at zero token cost"
-        )
+    # A broken test RUNNER makes the acceptance gate unpassable — surface it up
+    # front so the supervisor can abort before the worker wastes tokens on it.
+    preflight_extra: dict[str, Any] = {}
     if preflight_report is not None:
-        response["preflight"] = preflight_report
+        preflight_extra["preflight"] = preflight_report
         note = preflight_mod.preflight_note(preflight_report)
         if note:
-            response["preflight_note"] = note
-    return json.dumps(response)
+            preflight_extra["preflight_note"] = note
+
+    if watch:
+        # Block and stream the worker live into the chat until it finishes or
+        # asks a question. This is the default, TUI- and desktop-native path.
+        j = await _stream_until_pause(ctx, wt["taskId"])
+        return json.dumps({**_watch_return(wt["taskId"], j), **preflight_extra})
+
+    return json.dumps(
+        {
+            "task_id": wt["taskId"], "status": "running",
+            "branch": wt["branch"], "worktree": wt["worktree"],
+            "model": resolved["model"], "model_source": resolved["source"],
+            "note": "watch=False: poll get_task_status(task_id, wait_seconds=120), "
+                    "or attach live with watch_task(task_id)",
+            **preflight_extra,
+        }
+    )
 
 
 def _status_payload(task_id: str, j: dict[str, Any]) -> dict[str, Any]:
@@ -168,8 +258,6 @@ def _status_payload(task_id: str, j: dict[str, Any]) -> dict[str, Any]:
         )
     if j.get("salvaged"):
         payload["salvaged"] = True
-    if DASHBOARD_URL:
-        payload["dashboard_url"] = DASHBOARD_URL
     return payload
 
 
@@ -203,6 +291,30 @@ async def get_task_status(task_id: str, wait_seconds: int = 0) -> str:
             if _status_fingerprint(j) != baseline:
                 break
     return json.dumps(_status_payload(task_id, j))
+
+
+@mcp.tool(
+    description=(
+        "Attaches to a running task and BLOCKS, streaming its live activity as progress "
+        "notifications (shown in the chat like a Bash command), until it finishes or asks a "
+        "question. Use it to resume watching after answer_worker, or to start watching a task "
+        "that was launched with watch=False. Returns the same shape as run_dev_task's watch mode."
+    )
+)
+async def watch_task(task_id: str, ctx: Context) -> str:
+    j = get_job_with_fallback(task_id, cfg.work_dir)
+    if not j:
+        return json.dumps({"error": "unknown task_id"})
+    status = j.get("status")
+    if status in TERMINAL_STATES or status == "needs_input":
+        # Nothing to stream — already at a decision point. Hand back the state.
+        return json.dumps(_watch_return(task_id, j))
+    if task_id not in {job["taskId"] for job in all_jobs()}:
+        return json.dumps(
+            {"task_id": task_id, "error": "task is not live in this server session; use fetch_task_result"}
+        )
+    j = await _stream_until_pause(ctx, task_id)
+    return json.dumps(_watch_return(task_id, j))
 
 
 @mcp.tool(
@@ -552,11 +664,4 @@ async def auth_poll(flow_id: str) -> str:
 
 
 if __name__ == "__main__":
-    # Live dashboard (SSE over localhost): the user watches worker activity
-    # in a browser while the supervisor stays token-idle. Best-effort — a
-    # bind failure must never take the MCP server down with it.
-    try:
-        DASHBOARD_URL = start_dashboard(_jobs_snapshot)
-    except Exception:  # noqa: BLE001
-        DASHBOARD_URL = None
     mcp.run()

@@ -11,7 +11,7 @@ The supervisor stays on Anthropic; only the worker is billed on the alternate pr
 ```mermaid
 flowchart LR
   Supervisor["Claude Code supervisor<br/>(Anthropic API)"]
-  MCP["cc-delegate MCP server<br/>Python (uv run server/main.py), stdio<br/>run_dev_task, get_task_status,<br/>answer_worker, cancel_task,<br/>fetch_task_result, cleanup_task<br/>+ SSE dashboard :45673"]
+  MCP["cc-delegate MCP server<br/>Python (uv run server/main.py), stdio<br/>run_dev_task (watch), watch_task,<br/>get_task_status, answer_worker,<br/>cancel_task, fetch_task_result, cleanup_task"]
   Worktree["Disposable git worktree<br/>branch delegate/&lt;task_id&gt;"]
   Worker["uv run worker/worker.py<br/>deepagents loop<br/>+ implementer / tester / reviewer subagents<br/>+ rubric grader"]
   Provider["Provider<br/>(litellm-routed,<br/>e.g. MiniMax M3)"]
@@ -22,15 +22,16 @@ flowchart LR
   MCP -->|"uv run worker.py"| Worker
   Worker -->|"litellm completion"| Provider
   Provider -->|"model response"| Worker
-  Worker -->|"PROGRESS: {step, node, ...}<br/>(live, flushed per step)<br/>RESULT_JSON: {status, summary,<br/>turns, cost_usd, total_tokens,<br/>rubric_status, error}"| MCP
-  MCP -->|"latest progress<br/>(get_task_status)"| Supervisor
+  Worker -->|"PROGRESS: {step, node, ...}<br/>QUESTION: {id, message}<br/>(live, flushed per step)<br/>RESULT_JSON: {status, summary,<br/>turns, cost_usd, total_tokens,<br/>rubric_status, error}"| MCP
+  MCP -->|"live progress notifications<br/>(watch mode, in chat)"| Supervisor
   Worktree -->|"git diff --cached"| MCP
   MCP -->|"patch + diff"| Review
 ```
 
 - **`cc-delegate` MCP server** (`server/main.py`, official `mcp` Python SDK, run via
   `uv run`) — exposes the delegation tools to the supervisor over stdio: `run_dev_task` (start
-  a delegated task — preflights your `test_command` first — and return a `task_id`),
+  a delegated task — preflights your `test_command` first — and, by default, stream it live in
+  the chat until it finishes or asks a question), `watch_task` (attach/resume the live stream),
   `get_task_status` (long-poll with `wait_seconds`; returns early on progress, completion, or
   a worker question), `answer_worker` (reply to a worker blocked on a question),
   `cancel_task` (kill a stalled/runaway worker's whole process tree, salvaging its work),
@@ -52,24 +53,38 @@ flowchart LR
 - **Packaged skill** (`skills/delegate-heavy-dev/SKILL.md`) — teaches the supervisor when and
   how to delegate.
 
-## Live dashboard — watch the worker without burning tokens
+## Watch mode — the delegation streams live in the chat
 
-Polling a running delegation through the supervisor costs supervisor tokens; waiting blind is
-frustrating. The MCP server therefore serves a local **live dashboard** at
-`http://127.0.0.1:45673` (falls back to an ephemeral port if busy; the actual URL is included
-in every `run_dev_task` / `get_task_status` response and written to
-`~/.cc-delegate/dashboard.json`).
+By default `run_dev_task` runs in **watch mode**: the call blocks and relays the worker's
+activity to the supervisor as MCP **progress notifications**, so the delegation shows live *in
+the chat* — right where a Bash tool streams its output — on both the TUI and the desktop app. It
+costs **zero supervisor tokens** (progress notifications bypass the model). You see every shell
+command, progress note, and question stream by, then the call returns with the final result.
 
-Open it in a browser and you see, streamed over SSE in real time: every shell command the
-worker runs, its progress reports, questions it asks, and the final verdict with cost — for
-every task of the session. The supervisor only needs `get_task_status` at decision points;
-your eyes do the monitoring for free. Disable with `DELEGATE_DASHBOARD=0`, pin the port with
-`DELEGATE_DASHBOARD_PORT`. Everything stays on 127.0.0.1.
+```
+run_dev_task ⏳  worker started · MiniMax-M3
+             $ npm test
+             12 passing
+             ✓ done · 4 files · $0.24
+```
 
-## Status line — live progress inside Claude Code
+**Questions stay the supervisor's call.** When the worker asks something (`ask_supervisor` /
+`report_blocker`), watch mode returns control to the supervisor with the question — it never pops
+a dialog at the user. The supervisor decides at its discretion: answer from its own context with
+`answer_worker(task_id, answer)`, or relay to the user when it is genuinely a user decision. Then
+`watch_task(task_id)` resumes the live stream. A question is the single point that costs a
+supervisor turn — exactly where judgment belongs.
 
-The dashboard lives in a browser tab; the **status line** puts the same glance *inside* Claude
-Code's own status bar, token-free. While a delegation runs you see one live line:
+For running several delegations at once, pass `watch=False`: `run_dev_task` returns a `task_id`
+immediately and you supervise with `get_task_status(wait_seconds=…)` or attach later with
+`watch_task`. Progress notifications degrade gracefully — a client that sends no `progressToken`
+still gets a blocking call that returns the result, just without the intermediate lines.
+
+## Status line — always-visible ambient indicator
+
+Watch mode is the blow-by-blow view on the active tool call; the **status line** keeps a
+one-line glance *in Claude Code's status bar* even after the tool call scrolls away, token-free
+(TUI only — the desktop app does not render custom status lines). While a delegation runs:
 
 ```
 ⏳ delegate t_…yqsldx · MiniMax-M3 · step 24 · writing src/auth/tokens.js
@@ -105,12 +120,12 @@ summary that then fades — no stale state left on screen.
 
 The worker is not fire-and-forget anymore. Three tools are injected into its agent loop:
 
-- **`report_progress(update)`** — fire-and-forget one-liners at phase transitions; they feed
-  `get_task_status` and the dashboard.
+- **`report_progress(update)`** — fire-and-forget one-liners at phase transitions; they stream
+  into watch mode, `get_task_status`, and the status line.
 - **`ask_supervisor(question, context)`** — blocks the worker (zero tokens spent while
-  waiting) and flips the task to status `needs_input`. The supervisor sees the question in
-  `get_task_status` (a long-poll returns early), optionally relays it to you, and replies with
-  `answer_worker(task_id, answer)`; the worker resumes with the answer.
+  waiting) and flips the task to status `needs_input`. In watch mode the `run_dev_task` /
+  `watch_task` call returns with the question so the supervisor can answer or relay it; it then
+  replies with `answer_worker(task_id, answer)` and the worker resumes.
 - **`report_blocker(problem, attempts)`** — same mechanism, for "I've failed 3 times at the
   same error" situations: the supervisor gets a chance to correct course instead of the worker
   thrashing until timeout.

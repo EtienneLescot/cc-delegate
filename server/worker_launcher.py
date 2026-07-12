@@ -4,7 +4,7 @@
 as it arrives:
 
 - ``PROGRESS:`` lines refresh job["progress"] + lastActivityTs (persisted so
-  get_task_status sees them live) and feed the event bus (SSE dashboard);
+  get_task_status sees them live) and feed the event bus (watch stream);
 - ``QUESTION:`` lines flip the job to ``needs_input`` — the worker is then
   blocked waiting for answer_worker to drop a file in the comm dir;
 - the final ``RESULT_JSON:`` line decides success/failure;
