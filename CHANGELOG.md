@@ -3,6 +3,32 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.7.0
+
+Async supervision is the default again. Watch mode (0.6.0) was the wrong bet: field-tested in the
+Claude desktop app, it blocked the supervisor for the whole run (3m40s on a real delegation) while
+showing **nothing** — the desktop does not render MCP progress notifications inline. That is
+strictly worse than the async model, where the supervisor stays free and parallel.
+
+### Changed
+
+- **`run_dev_task` defaults to `watch=False`** — it returns a `task_id` immediately and the worker
+  runs in the background, so the supervisor keeps working with the user. Supervise by polling
+  `get_task_status(task_id, wait_seconds=…)` on demand.
+- **Documented the hard constraint:** a standard MCP server cannot push into the model's context.
+  The worker reaches the supervisor (progress, questions, result) only when the supervisor polls —
+  there is no clean "worker notifies Opus" path (progress notifications don't enter model context
+  and mostly aren't rendered; `channels` is a heavy research-preview that spends a turn per push).
+  This is now stated plainly in the README and skill instead of being fought.
+
+### Notes
+
+- `watch=True` and `watch_task` remain as an opt-in for clients confirmed to render MCP tool
+  progress; the default and all guidance are async. The status line (0.5.0) stays as the TUI
+  ambient indicator.
+- No browser dashboard: it was removed in 0.6.0 and, by choice, not restored — status queries go
+  through the supervisor on demand.
+
 ## 0.6.0
 
 Watch mode — the delegation streams live *inside the chat*, like a Bash command. Works

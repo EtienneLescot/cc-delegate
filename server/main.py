@@ -129,13 +129,15 @@ def _watch_return(task_id: str, j: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool(
     description=(
-        "Starts an autonomous coding worker on an isolated git worktree. "
-        "By default (watch=True) it BLOCKS and streams the worker's live activity as progress "
-        "notifications — the delegation shows in the chat like a Bash command's output, on both "
-        "the TUI and desktop app, at zero token cost — returning when the task finishes OR the "
-        "worker asks a question (status 'needs_input'). On a question, answer with answer_worker "
-        "then resume with watch_task. Set watch=False for fire-and-forget: it returns a task_id "
-        "immediately and you poll with get_task_status (use this to run several tasks in parallel)."
+        "Starts an autonomous coding worker on an isolated git worktree and returns a task_id "
+        "IMMEDIATELY — the worker runs in the background and you stay free to keep working with the "
+        "user. Supervise by polling get_task_status(task_id, wait_seconds=...), which reports "
+        "progress, a worker question (status 'needs_input' → answer_worker), or completion; then "
+        "fetch_task_result. This async model is the right one: MCP cannot push into your context, "
+        "so the worker communicates only when you poll. (Advanced: watch=True instead BLOCKS and "
+        "streams progress notifications, but most clients — including the desktop app — do not "
+        "render them, so it just freezes you with no visible output; only use it on a client you "
+        "have confirmed renders MCP tool progress.)"
     )
 )
 async def run_dev_task(
@@ -148,7 +150,7 @@ async def run_dev_task(
     recursion_limit: int | None = None,
     timeout_ms: int | None = None,
     profile: str | None = None,
-    watch: bool = True,
+    watch: bool = False,
 ) -> str:
     # Resolve model/key per task from the config store (facade profiles),
     # falling back to legacy env config. Read fresh each call so facade
@@ -217,8 +219,9 @@ async def run_dev_task(
             preflight_extra["preflight_note"] = note
 
     if watch:
-        # Block and stream the worker live into the chat until it finishes or
-        # asks a question. This is the default, TUI- and desktop-native path.
+        # Opt-in blocking stream. Only useful on a client that renders MCP tool
+        # progress notifications; most (incl. the desktop app) don't, so this
+        # just blocks with no visible output. Async (below) is the default.
         j = await _stream_until_pause(ctx, wt["taskId"])
         return json.dumps({**_watch_return(wt["taskId"], j), **preflight_extra})
 
@@ -227,8 +230,10 @@ async def run_dev_task(
             "task_id": wt["taskId"], "status": "running",
             "branch": wt["branch"], "worktree": wt["worktree"],
             "model": resolved["model"], "model_source": resolved["source"],
-            "note": "watch=False: poll get_task_status(task_id, wait_seconds=120), "
-                    "or attach live with watch_task(task_id)",
+            "note": "worker running in the background — you are free to continue. Supervise by "
+                    "polling get_task_status(task_id, wait_seconds=90) when you want an update or "
+                    "the user asks; answer_worker if it returns 'needs_input'; fetch_task_result "
+                    "when done.",
             **preflight_extra,
         }
     )
