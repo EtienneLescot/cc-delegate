@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.3
+
+### Fixed
+
+- **Worker crashed with `ModuleNotFoundError: No module named 'fastapi'`** at
+  `RubricMiddleware.before_agent`, blocking every delegation. deepagents 0.7.0a6's rubric
+  grader imports `fastapi` lazily but doesn't declare it; added `fastapi` to
+  `worker/worker.py`'s PEP-723 dependencies. Verified: a real MiniMax delegation runs to
+  `succeeded` again.
+
 ## 0.3.2
 
 OAuth device flow (GitHub Copilot) — subscription auth without an API key.

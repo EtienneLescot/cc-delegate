@@ -3,6 +3,7 @@
 # dependencies = [
 #   "deepagents>=0.7.0a6",
 #   "langchain-litellm",
+#   "fastapi",
 # ]
 # ///
 """Runs one delegated coding task with deepagents, then prints a single
