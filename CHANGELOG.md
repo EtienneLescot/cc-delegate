@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.4
+
+### Fixed
+
+- **Windows shell friction.** deepagents' `LocalShellBackend` runs commands via
+  `subprocess.run(shell=True)`, i.e. cmd.exe on Windows — so the model's Unix-style commands
+  (`ls`, `find`, `cat`, `&&`, forward-slash paths) failed, and the worker burned turns fighting
+  the shell. Added `BashShellBackend`, which on Windows routes each command through bash (found
+  via `PATH`/Git/hermes) by writing it to a temp script — sidestepping cmd.exe and all quoting
+  conflicts. Measured on a trivial task: 71 → 44 steps, ~10 shell errors → 1, ~19% lower cost.
+  No change on non-Windows (default shell is already sh-compatible).
+
 ## 0.3.3
 
 ### Fixed

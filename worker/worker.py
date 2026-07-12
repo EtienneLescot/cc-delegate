@@ -18,7 +18,9 @@ to stdout so the MCP server can refresh its ``get_task_status`` view live.
 import argparse
 import json
 import os
+import shutil
 import sys
+import tempfile
 
 import litellm
 
@@ -26,6 +28,57 @@ from deepagents import RubricMiddleware, SubAgent, create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
 
 RESULT_MARKER = "RESULT_JSON:"
+
+
+def _find_bash() -> str | None:
+    """Locate a bash executable on Windows so the worker's shell commands run
+    under bash instead of cmd.exe.
+
+    deepagents' LocalShellBackend runs commands with ``subprocess.run(shell=True)``,
+    which on Windows means cmd.exe. Models routinely emit Unix commands
+    (``ls``, ``find``, ``cat``, ``&&``, forward-slash paths) that cmd.exe
+    rejects — the worker then burns turns fighting the shell. Routing through
+    bash (present via Git/hermes on most dev machines) fixes that. Returns None
+    when no bash is found, in which case we leave the default backend untouched.
+    """
+    found = shutil.which("bash")
+    if found:
+        return found
+    for cand in (
+        os.path.expandvars(r"%LOCALAPPDATA%\hermes\git\usr\bin\bash.exe"),
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+    ):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+class BashShellBackend(LocalShellBackend):
+    """LocalShellBackend that routes commands through bash on Windows.
+
+    Each command is written to a temp script inside the working directory and
+    run via ``"<bash>" "<script>"`` — delegating to the parent's cmd.exe path,
+    but with bash as the actual interpreter. Using a script file (not an inline
+    ``bash -c "…"``) sidesteps all Windows/cmd/bash quoting conflicts.
+    """
+
+    def __init__(self, *args, bash_path: str, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._bash_path = bash_path
+
+    def execute(self, command: str, *, timeout: int | None = None):
+        fd, path = tempfile.mkstemp(suffix=".sh", dir=str(self.cwd))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                f.write("set -e\n" + command + "\n")
+            script = path.replace("\\", "/")
+            return super().execute(f'"{self._bash_path}" "{script}"', timeout=timeout)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 PROGRESS_MARKER = "PROGRESS:"
 
 # Substrings (case-insensitive) that mark an env var as a secret. Matched
@@ -232,13 +285,22 @@ def main() -> int:
     # back through a shell command. PATH / HOME / SystemRoot / TEMP survive so
     # node/npm/git still work. The Python process's own os.environ keeps the
     # provider key — litellm reads it from there.
-    backend = LocalShellBackend(
+    shell_env = build_shell_env(args.api_key_env_var)
+    backend_kwargs = dict(
         root_dir=args.worktree,
         virtual_mode=True,
         timeout=120,
         inherit_env=False,
-        env=build_shell_env(args.api_key_env_var),
+        env=shell_env,
     )
+    # On Windows, route shell commands through bash if available so the model's
+    # Unix-style commands work instead of failing against cmd.exe (see
+    # BashShellBackend). Elsewhere the default shell is already sh-compatible.
+    bash_path = _find_bash() if os.name == "nt" else None
+    if bash_path:
+        backend = BashShellBackend(bash_path=bash_path, **backend_kwargs)
+    else:
+        backend = LocalShellBackend(**backend_kwargs)
 
     # Register a litellm success callback to meter cost + tokens across every
     # model call in the run (main agent, subagents, rubric grader). Registered
