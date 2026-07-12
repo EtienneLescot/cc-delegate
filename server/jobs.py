@@ -98,6 +98,26 @@ def create_worktree(work_dir: str, repo_path: str, base_branch: str | None = Non
     return {"taskId": task_id, "branch": branch, "worktree": worktree, "repo": repo}
 
 
+def worktree_changed_files(worktree: str) -> list[str]:
+    """Files the worker has created/modified in its worktree so far (uncommitted).
+
+    A live audit for get_task_progress: the worker commits only at salvage/success,
+    so mid-run its work shows up as porcelain status. Never raises — returns [] if
+    the worktree is gone or git errors.
+    """
+    try:
+        out = _git(worktree, "status", "--porcelain").stdout
+    except (subprocess.CalledProcessError, OSError):
+        return []
+    files: list[str] = []
+    for line in out.splitlines():
+        name = line[3:].strip() if len(line) > 3 else line.strip()
+        if name:
+            # `R  old -> new` rename form: keep the destination path.
+            files.append(name.split(" -> ")[-1])
+    return files
+
+
 def collect_diff(work_dir: str, repo: str, worktree: str, task_id: str) -> dict[str, Any]:
     """Produce the git patch + list of files the worker changed."""
     _git(worktree, "add", "-A")

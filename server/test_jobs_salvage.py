@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from jobs import create_worktree, salvage_worktree
+from jobs import create_worktree, salvage_worktree, worktree_changed_files
 
 
 def _git(cwd, *args):
@@ -54,6 +54,18 @@ class TestSalvageWorktree(unittest.TestCase):
         job = {**wt, "status": "failed"}
         self.assertFalse(salvage_worktree(".cc-delegate", job))
         self.assertNotIn("filesChanged", job)
+
+    def test_worktree_changed_files_lists_uncommitted(self):
+        wt = create_worktree(".cc-delegate", self.repo, "main")
+        self.assertEqual(worktree_changed_files(wt["worktree"]), [])
+        (Path(wt["worktree"]) / "index.html").write_text("<canvas>", encoding="utf-8")
+        (Path(wt["worktree"]) / "app.js").write_text("//", encoding="utf-8")
+        files = worktree_changed_files(wt["worktree"])
+        self.assertIn("index.html", files)
+        self.assertIn("app.js", files)
+
+    def test_worktree_changed_files_missing_dir_returns_empty(self):
+        self.assertEqual(worktree_changed_files(str(Path(self.tmp.name) / "nope")), [])
 
     def test_salvage_never_raises_on_missing_worktree(self):
         job = {

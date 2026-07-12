@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import queue
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import FastMCP
 
 import config_store
 import events
@@ -30,13 +29,13 @@ import preflight as preflight_mod
 import statusline_render
 from config import load_config
 from jobs import (
-    all_jobs,
     cleanup_job,
     create_worktree,
     get_job_with_fallback,
     persist_job,
     put_job,
     runtime,
+    worktree_changed_files,
 )
 from proc_utils import kill_tree
 from worker_launcher import comm_dir_for, run_worker
@@ -47,110 +46,26 @@ mcp = FastMCP("cc-delegate")
 TERMINAL_STATES = {"succeeded", "failed", "timeout", "cancelled"}
 
 
-async def _stream_until_pause(ctx: Context, task_id: str) -> dict[str, Any]:
-    """Block, relaying the worker's events as MCP progress notifications, until
-    the task reaches a terminal state OR blocks on a question (needs_input).
-
-    This is what makes a delegation show live *inside* Claude Code — the same
-    place a Bash tool streams its output — on both the TUI and the desktop app,
-    at zero supervisor-token cost (progress notifications bypass the model).
-    Returns the (mutated, live) job dict at the pause point.
-
-    report_progress no-ops when the client sends no progressToken, so the call
-    still works (it just blocks and returns the result) on clients that don't
-    render progress — graceful degradation.
-    """
-    q = events.subscribe()
-    counter = 0
-    try:
-        # Seed one line immediately so the tool shows activity right away.
-        j = get_job_with_fallback(task_id, cfg.work_dir)
-        if j and j.get("progress"):
-            counter += 1
-            await _safe_progress(ctx, counter, j["progress"])
-        while True:
-            while True:
-                try:
-                    ev = q.get_nowait()
-                except queue.Empty:
-                    break
-                if ev.get("task_id") != task_id:
-                    continue
-                counter += 1
-                await _safe_progress(ctx, ev.get("step") or counter, events.event_message(ev))
-            j = get_job_with_fallback(task_id, cfg.work_dir)
-            status = j.get("status") if j else None
-            if status == "needs_input" or status in TERMINAL_STATES:
-                return j or {}
-            await asyncio.sleep(0.4)
-    finally:
-        events.unsubscribe(q)
-
-
-async def _safe_progress(ctx: Context, progress: float, message: str) -> None:
-    try:
-        await ctx.report_progress(progress=progress, total=None, message=message)
-    except Exception:  # noqa: BLE001 - progress is advisory; never break the run over it
-        pass
-
-
-def _watch_return(task_id: str, j: dict[str, Any]) -> dict[str, Any]:
-    """Shape the payload handed back to the supervisor when a watch pauses."""
-    status = j.get("status")
-    if status == "needs_input":
-        return {
-            "task_id": task_id,
-            "status": "needs_input",
-            "question": j.get("question"),
-            "action_required": (
-                "the worker is blocked on this question. Decide at your discretion: answer it "
-                "yourself with answer_worker(task_id, answer) when it is within your context, or "
-                "relay it to the user first when it is genuinely a product/user decision. Then call "
-                "watch_task(task_id) to resume the live stream."
-            ),
-        }
-    # terminal
-    return {
-        "task_id": task_id,
-        "status": status,
-        "summary": j.get("summary"),
-        "patch_path": j.get("patchPath"),
-        "files_changed": j.get("filesChanged", []),
-        "cost_usd": j.get("costUsd"),
-        "total_tokens": j.get("totalTokens"),
-        "num_turns": j.get("turns", 0),
-        "branch": j.get("branch"),
-        "worktree": j.get("worktree"),
-        "salvaged": j.get("salvaged", False),
-        "error": j.get("error"),
-        "next": "review the diff at patch_path, then decide with the user whether to merge the branch",
-    }
-
-
 @mcp.tool(
     description=(
         "Starts an autonomous coding worker on an isolated git worktree and returns a task_id "
-        "IMMEDIATELY — the worker runs in the background and you stay free to keep working with the "
-        "user. Supervise by polling get_task_status(task_id, wait_seconds=...), which reports "
-        "progress, a worker question (status 'needs_input' → answer_worker), or completion; then "
-        "fetch_task_result. This async model is the right one: MCP cannot push into your context, "
-        "so the worker communicates only when you poll. (Advanced: watch=True instead BLOCKS and "
-        "streams progress notifications, but most clients — including the desktop app — do not "
-        "render them, so it just freezes you with no visible output; only use it on a client you "
-        "have confirmed renders MCP tool progress.)"
+        "IMMEDIATELY — the worker runs in the background and you stay free. MCP cannot push into "
+        "your context, so supervise by polling: end your turn and re-check on a cadence you "
+        "schedule (or when the user asks). Use the cheap get_task_status for liveness "
+        "(running / needs_input / done), get_task_progress for an occasional deeper audit "
+        "(files written, recent activity), answer_worker to unblock a question, and "
+        "fetch_task_result when done."
     )
 )
 async def run_dev_task(
     spec: str,
     repo_path: str,
-    ctx: Context,
     test_command: str | None = None,
     definition_of_done: str | None = None,
     base_branch: str | None = None,
     recursion_limit: int | None = None,
     timeout_ms: int | None = None,
     profile: str | None = None,
-    watch: bool = False,
 ) -> str:
     # Resolve model/key per task from the config store (facade profiles),
     # falling back to legacy env config. Read fresh each call so facade
@@ -218,108 +133,95 @@ async def run_dev_task(
         if note:
             preflight_extra["preflight_note"] = note
 
-    if watch:
-        # Opt-in blocking stream. Only useful on a client that renders MCP tool
-        # progress notifications; most (incl. the desktop app) don't, so this
-        # just blocks with no visible output. Async (below) is the default.
-        j = await _stream_until_pause(ctx, wt["taskId"])
-        return json.dumps({**_watch_return(wt["taskId"], j), **preflight_extra})
-
     return json.dumps(
         {
             "task_id": wt["taskId"], "status": "running",
             "branch": wt["branch"], "worktree": wt["worktree"],
             "model": resolved["model"], "model_source": resolved["source"],
-            "note": "worker running in the background — you are free to continue. Supervise by "
-                    "polling get_task_status(task_id, wait_seconds=90) when you want an update or "
-                    "the user asks; answer_worker if it returns 'needs_input'; fetch_task_result "
-                    "when done.",
+            "note": "worker running in the background — you are free to continue. Don't block: end "
+                    "your turn and re-check on a cadence you schedule (or when the user asks). "
+                    "get_task_status is cheap for liveness; get_task_progress audits deeper; "
+                    "answer_worker unblocks a 'needs_input' question; fetch_task_result when done.",
             **preflight_extra,
         }
     )
 
 
-def _status_payload(task_id: str, j: dict[str, Any]) -> dict[str, Any]:
+@mcp.tool(
+    description=(
+        "CHEAP liveness check — call this often while supervising. Returns a tiny payload: the "
+        "status (running / needs_input / succeeded / failed / timeout / cancelled), a `done` flag, "
+        "and, if the worker is blocked, the pending question. Keep polling on your own cadence; on "
+        "'needs_input' answer with answer_worker; on `done` call fetch_task_result. For a deeper "
+        "look (files written so far, recent activity) call get_task_progress instead."
+    )
+)
+async def get_task_status(task_id: str) -> str:
+    j = get_job_with_fallback(task_id, cfg.work_dir)
+    if not j:
+        return json.dumps({"error": "unknown task_id"})
+    status = j.get("status")
+    payload: dict[str, Any] = {
+        "task_id": task_id,
+        "status": status,
+        "done": status in TERMINAL_STATES,
+    }
+    q = j.get("question")
+    if status == "needs_input" and q:
+        payload["question"] = {"id": q.get("id"), "message": q.get("message")}
+        payload["action_required"] = (
+            "answer_worker(task_id, answer) — answer from your own context, or relay to the user "
+            "first if it's genuinely their decision"
+        )
+    if status in TERMINAL_STATES:
+        payload["next"] = "fetch_task_result(task_id)"
+    if j.get("error"):
+        payload["error"] = j["error"]
+    return json.dumps(payload)
+
+
+@mcp.tool(
+    description=(
+        "VERBOSE progress audit — heavier than get_task_status, so call it occasionally (on your "
+        "own estimate) or when the user asks 'how's it going?'. Reports elapsed time, step count, "
+        "cost so far, the files the worker has touched in its worktree, and its most recent "
+        "activity (shell commands, notes) so you can actually see what it's doing."
+    )
+)
+async def get_task_progress(task_id: str, activity_limit: int = 12) -> str:
     import time as _time
+
+    j = get_job_with_fallback(task_id, cfg.work_dir)
+    if not j:
+        return json.dumps({"error": "unknown task_id"})
 
     payload: dict[str, Any] = {
         "task_id": task_id,
         "status": j.get("status"),
-        "progress": j.get("progress"),
-        "turns": j.get("turns", 0),
+        "step": j.get("lastStep") or j.get("turns", 0),
         "cost_usd": j.get("costUsd"),
-        "total_tokens": j.get("totalTokens"),
-        "error": j.get("error"),
+        "latest_note": j.get("progress"),
     }
     if j.get("startedAt"):
         payload["elapsed_s"] = round(_time.time() - j["startedAt"])
     if j.get("lastActivityTs"):
         payload["last_activity_age_s"] = round(_time.time() - j["lastActivityTs"])
+
+    # Live audit of what the worker has actually written in its worktree.
+    if j.get("worktree"):
+        payload["files_touched"] = worktree_changed_files(j["worktree"])
+
+    # Recent activity, newest last, rendered the same way the events feed does.
+    recent = events.read_log(j.get("repo", ""), task_id, cfg.work_dir, limit=activity_limit)
+    payload["recent_activity"] = [events.event_message(e) for e in recent]
+
     if j.get("question"):
         payload["question"] = j["question"]
-        payload["action_required"] = (
-            "the worker is blocked on this question — reply with answer_worker(task_id, answer); "
-            "relay it to the user first if it is a product/user decision"
-        )
     if j.get("salvaged"):
         payload["salvaged"] = True
-    return payload
-
-
-def _status_fingerprint(j: dict[str, Any]) -> tuple:
-    return (
-        j.get("status"), j.get("progress"),
-        (j.get("question") or {}).get("id"), j.get("lastActivityTs"),
-    )
-
-
-@mcp.tool(
-    description=(
-        "Returns current status, progress, cost and turns. Pass wait_seconds (recommended: 60-120) "
-        "to long-poll: the call returns EARLY on any change — new progress, completion, or the worker "
-        "asking a question (status 'needs_input'). Prefer one long-poll over many short polls."
-    )
-)
-async def get_task_status(task_id: str, wait_seconds: int = 0) -> str:
-    j = get_job_with_fallback(task_id, cfg.work_dir)
-    if not j:
-        return json.dumps({"error": "unknown task_id"})
-
-    live = j.get("taskId") in {job["taskId"] for job in all_jobs()}
-    wait = max(0, min(int(wait_seconds or 0), 300))
-    if wait and live and j.get("status") == "running":
-        # In-process job dicts mutate live; poll the fingerprint cheaply.
-        baseline = _status_fingerprint(j)
-        deadline = asyncio.get_event_loop().time() + wait
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.5)
-            if _status_fingerprint(j) != baseline:
-                break
-    return json.dumps(_status_payload(task_id, j))
-
-
-@mcp.tool(
-    description=(
-        "Attaches to a running task and BLOCKS, streaming its live activity as progress "
-        "notifications (shown in the chat like a Bash command), until it finishes or asks a "
-        "question. Use it to resume watching after answer_worker, or to start watching a task "
-        "that was launched with watch=False. Returns the same shape as run_dev_task's watch mode."
-    )
-)
-async def watch_task(task_id: str, ctx: Context) -> str:
-    j = get_job_with_fallback(task_id, cfg.work_dir)
-    if not j:
-        return json.dumps({"error": "unknown task_id"})
-    status = j.get("status")
-    if status in TERMINAL_STATES or status == "needs_input":
-        # Nothing to stream — already at a decision point. Hand back the state.
-        return json.dumps(_watch_return(task_id, j))
-    if task_id not in {job["taskId"] for job in all_jobs()}:
-        return json.dumps(
-            {"task_id": task_id, "error": "task is not live in this server session; use fetch_task_result"}
-        )
-    j = await _stream_until_pause(ctx, task_id)
-    return json.dumps(_watch_return(task_id, j))
+    if j.get("error"):
+        payload["error"] = j["error"]
+    return json.dumps(payload)
 
 
 @mcp.tool(

@@ -3,6 +3,38 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.8.0
+
+Two-tier polling + scheduled supervision. Clarifies the supervision model and splits status by
+cost. Removes watch mode entirely.
+
+### Added
+
+- **`get_task_progress(task_id)`** — a verbose audit tool, complementary to the now-lean
+  `get_task_status`: elapsed time, step, cost so far, the files the worker has actually touched in
+  its worktree (`git status --porcelain`, a live view of uncommitted work), and its most recent
+  activity (shell commands, notes). Call it occasionally, or when the user asks "how's it going?".
+- **`jobs.worktree_changed_files(worktree)`** — the live file-audit helper behind it.
+
+### Changed
+
+- **`get_task_status` is now CHEAP and instant** — a tiny payload (`status`, a `done` flag, and the
+  pending `question` only when blocked). No more `wait_seconds` / server-side long-poll: the
+  supervisor is meant to poll it freely on a cadence **it schedules itself** (end the turn, get
+  re-invoked, check, re-arm), not to sit blocked inside the call. Frequent liveness checks stay
+  almost free; deeper detail is opt-in via `get_task_progress`.
+- **Skill:** supervision guidance rewritten around scheduled polling (don't block — end your turn
+  and re-check on your own cadence), the two-tier status/progress split, and **task decomposition:
+  split large work into bounded sub-tasks, parallelize ones touching different files, serialize
+  ones touching the same files.**
+
+### Removed
+
+- **Watch mode** — `run_dev_task(watch=...)`, the `watch_task` tool, and the blocking
+  progress-notification stream (0.6.0). Confirmed dead on the desktop app (blocks with nothing
+  visible), and redundant with scheduled polling. The event bus and `.jsonl` logs stay; they now
+  back `get_task_progress`'s recent-activity view.
+
 ## 0.7.0
 
 Async supervision is the default again. Watch mode (0.6.0) was the wrong bet: field-tested in the
