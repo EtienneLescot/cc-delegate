@@ -119,5 +119,64 @@ class TestPollStatus(OAuthTestCase):
         self.assertEqual(oauth.poll_status("deadbeef")["error"], "unknown flow_id")
 
 
+class StubChatGPTInnerAuthenticator:
+    """Mimics litellm's real ChatGPT Authenticator's private method surface
+    (a 3-step flow: request device code -> poll for an authorization code ->
+    exchange the code for tokens), so _ChatGPTDeviceFlowAdapter is exercised
+    without importing real litellm."""
+
+    def __init__(self):
+        self.written_auth_data = None
+        self.recorded_request = False
+
+    def _request_device_code(self):
+        return {"device_auth_id": "DAI-1", "user_code": "ABCD-1234", "interval": "5"}
+
+    def _record_device_code_request(self):
+        self.recorded_request = True
+
+    def _poll_for_authorization_code(self, device_code):
+        assert device_code == {"device_auth_id": "DAI-1", "user_code": "ABCD-1234", "interval": "5"}
+        return {"authorization_code": "AC-1", "code_challenge": "x", "code_verifier": "y"}
+
+    def _exchange_code_for_tokens(self, auth_code):
+        assert auth_code["authorization_code"] == "AC-1"
+        return {"access_token": "AT-1", "refresh_token": "RT-1", "id_token": "IDT-1"}
+
+    def _build_auth_record(self, tokens):
+        return {"access_token": tokens["access_token"], "built": True}
+
+    def _write_auth_file(self, auth_data):
+        self.written_auth_data = auth_data
+
+
+class TestChatGPTDeviceFlowAdapter(OAuthTestCase):
+    def test_get_device_code_shape(self):
+        inner = StubChatGPTInnerAuthenticator()
+        adapter = oauth._ChatGPTDeviceFlowAdapter(inner, "https://chatgpt.com/codex/device")
+        info = adapter._get_device_code()
+        self.assertEqual(info["verification_uri"], "https://chatgpt.com/codex/device")
+        self.assertEqual(info["user_code"], "ABCD-1234")
+        self.assertTrue(inner.recorded_request)
+        self.assertEqual(info["device_code"]["device_auth_id"], "DAI-1")  # round-trips whole dict
+
+    def test_poll_for_access_token_chains_all_three_steps_and_persists(self):
+        inner = StubChatGPTInnerAuthenticator()
+        adapter = oauth._ChatGPTDeviceFlowAdapter(inner, "https://x")
+        device_code = adapter._get_device_code()["device_code"]
+        token = adapter._poll_for_access_token(device_code)
+        self.assertEqual(token, "AT-1")
+        self.assertEqual(inner.written_auth_data, {"access_token": "AT-1", "built": True})
+
+    def test_full_flow_via_start_device_flow(self):
+        inner = StubChatGPTInnerAuthenticator()
+        oauth.PROVIDER_AUTHENTICATORS["chatgpt"] = lambda: oauth._ChatGPTDeviceFlowAdapter(inner, "https://x")
+        info = oauth.start_device_flow("chatgpt")
+        self.assertEqual(info["user_code"], "ABCD-1234")
+        self.assertNotIn("device_code", info)  # never relayed, same guarantee as github_copilot
+        self.assertTrue(self._wait_status(info["flow_id"], "authorized"))
+        self.assertEqual(inner.written_auth_data["access_token"], "AT-1")
+
+
 if __name__ == "__main__":
     unittest.main()

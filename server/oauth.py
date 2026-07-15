@@ -31,8 +31,54 @@ def _github_copilot_authenticator() -> Any:
     return Authenticator()
 
 
+class _ChatGPTDeviceFlowAdapter:
+    """Adapts litellm's ChatGPT ``Authenticator`` to the two-method shape
+    ``start_device_flow``/``_run_poll`` expect (matching github_copilot's
+    Authenticator: ``_get_device_code()`` then ``_poll_for_access_token(...)``).
+
+    The real ChatGPT authenticator is a THREE-step flow — request a device
+    code, poll for an authorization code, exchange that code for tokens — and
+    its own ``_login_device_code()`` convenience method prints the
+    verification URL/code to stdout (useless headless, same problem
+    github_copilot's ``_login()`` had). This adapter drives the three
+    non-printing steps itself and persists the result to the same auth file
+    ``get_access_token()``/``get_account_id()`` read from, so normal
+    completions work immediately afterward — without changing the generic
+    device-flow runner at all.
+    """
+
+    def __init__(self, authenticator: Any, verify_url: str) -> None:
+        self._auth = authenticator
+        self._verify_url = verify_url
+
+    def _get_device_code(self) -> dict[str, Any]:
+        device_code = self._auth._request_device_code()
+        self._auth._record_device_code_request()
+        return {
+            "device_code": device_code,  # whole dict; round-tripped as-is to _poll_for_access_token
+            "verification_uri": self._verify_url,
+            "user_code": device_code["user_code"],
+            "interval": device_code.get("interval"),
+        }
+
+    def _poll_for_access_token(self, device_code: dict[str, Any]) -> str:
+        auth_code = self._auth._poll_for_authorization_code(device_code)
+        tokens = self._auth._exchange_code_for_tokens(auth_code)
+        auth_data = self._auth._build_auth_record(tokens)
+        self._auth._write_auth_file(auth_data)
+        return tokens["access_token"]
+
+
+def _chatgpt_authenticator() -> Any:
+    from litellm.llms.chatgpt.authenticator import Authenticator
+    from litellm.llms.chatgpt.common_utils import CHATGPT_DEVICE_VERIFY_URL
+
+    return _ChatGPTDeviceFlowAdapter(Authenticator(), CHATGPT_DEVICE_VERIFY_URL)
+
+
 PROVIDER_AUTHENTICATORS: dict[str, Callable[[], Any]] = {
     "github_copilot": _github_copilot_authenticator,
+    "chatgpt": _chatgpt_authenticator,
 }
 
 # Model-string substrings that map to an OAuth provider key. Kept in sync with

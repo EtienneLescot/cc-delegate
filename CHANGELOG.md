@@ -3,6 +3,37 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.12.0
+
+ChatGPT subscription OAuth: plumbing shipped, validation spike still needs the user. Spec 002's
+"validation spike, then decide" gate — a real desk audit of litellm's shipped `chatgpt` provider
+source (not the thin docs) against the 6-item checklist, plus the auth plumbing to actually use it.
+
+### Added
+
+- **ChatGPT device-flow auth plumbing.** `_ChatGPTDeviceFlowAdapter` in `server/oauth.py` adapts
+  litellm's real ChatGPT `Authenticator` — a three-step flow (device code → authorization code →
+  token exchange), shaped differently from github_copilot's two-step one — to the same interface
+  `start_device_flow`/`setup_provider_auth`/`auth_poll` already use, so those generic tools now
+  work for `chatgpt` profiles with zero changes to them. 3 new unit tests (stubbed inner
+  authenticator) plus a live check against the real litellm package confirming the adapter's
+  assumed method names/shapes match, and that `auth.openai.com`'s device-code endpoint is live
+  and responding as expected.
+- **Desk-audit writeup** in `docs/specs/002-oauth-subscription-providers.md`: each checklist item
+  evaluated against actual source (endpoint, Codex identity instructions, tool-calling evidence,
+  JWT account-id extraction, `previous_response_id`, rejected-fields handling). Net finding:
+  markedly more mature than the spec anticipated in July 2026 — every item resolves positively or
+  is moot for our call path except tool-calling, which has strong indirect evidence (a real,
+  named upstream bug-fix) rather than a live confirmation.
+
+### Notes
+
+- **The actual authorization step needs the user** — visiting the verification URL and entering
+  the code ties to a real ChatGPT Plus/Pro account, which cannot be done on their behalf. The
+  spec's defined spike (a live toy delegation on a `chatgpt` profile) is ready to run as soon as
+  a user with a subscription completes `setup_provider_auth` themselves.
+- 81 server tests pass (78 + 3 new oauth tests).
+
 ## 0.11.0
 
 Proactive mid-run steering. The roadmap's "Later / unscheduled" item: the supervisor can now

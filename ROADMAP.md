@@ -60,12 +60,14 @@ delegation session (Pong on MiniMax M3) — see CHANGELOG for the incident detai
 
 See [docs/specs/002-oauth-subscription-providers.md](docs/specs/002-oauth-subscription-providers.md).
 
-- [ ] **ChatGPT subscription** via litellm's native `chatgpt` provider — gated on a validation
-      spike for tool calling under deepagents (Codex backend has documented quirks; see spec).
-      Fallback paths defined in the spec. Decision on record: no runtime dependency on yagr;
-      it serves as the reference implementation.
-- [ ] Factual ToS note in README (OpenAI tolerates + runs a support program; Anthropic
-      prohibits subscription use outside Claude Code; Google likewise for Gemini CLI).
+- [x] **ChatGPT subscription plumbing** (released 0.12.0): desk-audit of litellm's shipped
+      `chatgpt` provider against the checklist (net: more mature than expected), plus
+      `_ChatGPTDeviceFlowAdapter` so `setup_provider_auth`/`auth_poll` work for `chatgpt` profiles.
+      Decision on record: no runtime dependency on yagr; it serves as the reference implementation.
+      [ ] **Still open**: the live validation spike (toy delegation on a real `chatgpt` profile) —
+      needs a user with a ChatGPT Plus/Pro subscription to complete the device-flow auth
+      themselves; not something completable without them.
+- [x] Factual ToS note in README (released 0.12.0).
 
 ## Visibility / traction (parallel track)
 

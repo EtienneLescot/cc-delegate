@@ -590,8 +590,9 @@ async def setup_provider_auth(profile: str) -> str:
             {"error": f"profile {profile!r} is not an OAuth provider (model {prof.get('model')!r})"}
         )
     if provider not in oauth.PROVIDER_AUTHENTICATORS:
+        supported = ", ".join(sorted(oauth.PROVIDER_AUTHENTICATORS)) or "(none)"
         return json.dumps(
-            {"error": f"OAuth device flow not implemented for {provider!r} yet; only github_copilot is supported"}
+            {"error": f"OAuth device flow not implemented for {provider!r} yet; supported: {supported}"}
         )
 
     try:

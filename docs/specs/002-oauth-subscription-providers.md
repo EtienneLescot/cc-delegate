@@ -67,16 +67,62 @@ cached under `~/.config/litellm/github_copilot/`. Work:
 
 ### Phase 2 — ChatGPT: validation spike, then decide
 
-litellm also ships a native `chatgpt` provider (device flow, token cache via
-`CHATGPT_TOKEN_DIR`, models like `chatgpt/gpt-5.3-codex`, `completion()` bridged to
-Responses, strips rejected fields, `CHATGPT_ORIGINATOR` header). Known unknowns: the docs
-do not mention tool calling, identity-instruction injection, or session ids — items 2–5 of
-the checklist — and at least one open litellm issue reports subscription auth failures.
+**Desk-audit update (2026-07-15, litellm 1.92.0), against `site-packages/litellm/llms/chatgpt/`.**
+The checklist item-by-item, from reading the actual shipped source (not docs, which are still
+thin on this provider):
 
-**Spike protocol** (timeboxed, before any commitment): run the standard toy delegation
-(add function + test, requires write_file/execute tool round-trips) with
-`DELEGATE_MODEL=chatgpt/gpt-5.3-codex` through the normal deepagents worker. Pass = multi-turn
-tool calling works and the rubric grader completes. Evaluate each checklist item explicitly.
+1. **Endpoint** — confirmed: `CHATGPT_API_BASE = "https://chatgpt.com/backend-api/codex"`,
+   `get_complete_url` appends `/responses`; device flow at `auth.openai.com/codex/device`.
+   Live-checked: a real (unauthenticated, no-consequence) device-code request against
+   `auth.openai.com` returned a valid `{device_auth_id, user_code, interval}` response — the
+   endpoint is live and responding as documented. ✅
+2. **Codex identity instructions** — confirmed: `CHATGPT_DEFAULT_INSTRUCTIONS` ("You are Codex,
+   based on GPT-5...") is unconditionally prepended in `transform_responses_api_request`,
+   matching the `ensureCodexInstructions` pattern exactly. ✅
+3. **Tool calling shape** — our worker calls through `langchain_litellm.ChatLiteLLM` →
+   `litellm.completion()`, i.e. the **`chat/` module** (`ChatGPTConfig(OpenAIConfig)`), not the
+   `responses/` module directly. Strong evidence it works: `chat/streaming_utils.py` ships a
+   dedicated `ChatGPTToolCallNormalizer` that fixes two *specific, named* real-world bugs in the
+   backend's tool-call streaming (wrong `index` for parallel calls, duplicate "closing" chunks) —
+   that only exists because someone already exercised real tool-calling against this backend and
+   hit those bugs. High confidence, not a certainty from static reading alone. 🟡
+4. **Proprietary headers + account_id** — confirmed: `_extract_account_id` decodes the JWT and
+   reads the exact `https://api.openai.com/auth` → `chatgpt_account_id` claim from the spec;
+   `originator`, `session_id`, `ChatGPT-Account-Id` headers all present (no `x-codex-window-id`
+   equivalent, but nothing suggests it's required — Copilot-style single-session use, not a
+   multi-window desktop app). ✅
+5. **`previous_response_id` / stateful prompting** — present in the Responses-API allowlist, but
+   whether litellm auto-threads it is unverified and, for our integration, **likely moot**: the
+   `chat/` path we actually use is a stateless chat-completions call (full message history sent
+   every turn), so incremental-prompting statefulness isn't something our worker needs anyway.
+6. **Rejected fields** (`max_tokens`, `metadata`, ...) — confirmed via a different but equally
+   effective mechanism: `transform_responses_api_request` returns only an explicit `allowed_keys`
+   allowlist that simply excludes them, rather than a blocklist. ✅
+
+**Net assessment: markedly more mature than this spec anticipated in July 2026.** Every checklist
+item resolves positively or is moot for our specific call path, except tool-calling (item 3),
+which has strong-but-indirect evidence (a real, named bug-fix) rather than a live confirmation.
+
+**OAuth plumbing implemented** (`server/oauth.py`): litellm's real ChatGPT `Authenticator` is a
+three-step flow (request device code → poll for an authorization code → exchange the code for
+tokens) — different in shape from github_copilot's two-step one that `start_device_flow` was
+built against, and its own `_login_device_code()` convenience method prints to stdout (the same
+headless-unfriendly problem github_copilot's `_login()` had). `_ChatGPTDeviceFlowAdapter` drives
+the three non-printing private methods directly and persists the result to the same auth file
+`get_access_token()`/`get_account_id()` read from — so the existing generic
+`start_device_flow`/`setup_provider_auth`/`auth_poll` tools work for `chatgpt` profiles with zero
+changes to that generic code. 3 unit tests (stubbed inner authenticator) + confirmed against the
+real litellm package that the adapter's assumed method names/shapes match.
+
+**What's left — requires the user, not something I can complete alone:** the actual authorization
+step (visiting the URL, entering the code) ties to a real ChatGPT Plus/Pro account, and the
+`Spike protocol` below (a live toy delegation) needs that completed auth. Both are the user's to
+do; the plumbing is ready.
+
+**Spike protocol** (unchanged, still the bar for calling this "shipped"): run the standard toy
+delegation (add function + test, requires write_file/execute tool round-trips) with a `chatgpt`
+profile through the normal deepagents worker. Pass = multi-turn tool calling works and the rubric
+grader completes.
 
 Outcomes:
 - **Spike passes** → ship as a profile like Copilot; done.

@@ -249,12 +249,19 @@ Profiles live in `~/.cc-delegate/config.json`, facade-stored keys in
 `~/.cc-delegate/credentials.json`. Any litellm-routable model works — see
 [litellm's provider list](https://docs.litellm.ai/docs/providers).
 
-**Subscription providers (OAuth):** for a profile on an OAuth provider — GitHub Copilot today
-(`set_model_profile("copilot", "litellm:github_copilot/gpt-5")`, no API key) — run
-`setup_provider_auth("copilot")`. It returns a verification URL and a user code; visit the URL,
+**Subscription providers (OAuth):** for a profile on an OAuth provider — GitHub Copilot
+(`set_model_profile("copilot", "litellm:github_copilot/gpt-5")`, no API key) or ChatGPT
+(`set_model_profile("chatgpt", "litellm:chatgpt/gpt-5.3-codex")`) — run
+`setup_provider_auth("<profile>")`. It returns a verification URL and a user code; visit the URL,
 enter the code, authorize, and `auth_poll(flow_id)` flips to `authorized`. litellm caches the
-tokens, so later runs need no interaction and the key never touches the config. ChatGPT
-subscription OAuth is planned but not wired yet.
+tokens, so later runs need no interaction and the key never touches the config.
+
+**A note on ToS**, since this varies by provider: OpenAI tolerates and actively supports
+third-party tools using a ChatGPT subscription this way (its *Codex for Open Source* program
+lists such tools explicitly) — not a contractual guarantee, but an established norm. GitHub
+Copilot's device flow is likewise widely used by third-party editors and tools. Anthropic
+prohibits subscription use outside Claude Code itself, and Google does the equivalent for Gemini
+CLI — cc-delegate does not and will not implement OAuth for either.
 
 **Legacy env path (still supported):** see [`.env.example`](.env.example) for
 `DELEGATE_API_KEY`, `DELEGATE_MODEL`, `DELEGATE_API_KEY_ENV_VAR`, and the guardrails
