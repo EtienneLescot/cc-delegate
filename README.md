@@ -222,7 +222,9 @@ third-party endpoint, then tried shelling out to CLI coding agents (OpenCode, `d
 either an unresolved Claude Code CLI headless-auth bug or a Windows/no-TTY hang in `dcode`'s rich
 terminal UI. Calling `deepagents` directly as a library sidesteps both: no CLI, no TTY dependency,
 and real control over the loop (subagents, rubric-based convergence) instead of a black-box CLI.
-See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the Claude Agent SDK auth bug writeup.
+The full story — three worker engines, two upstream bugs — is in
+[docs/build-journey.md](docs/build-journey.md); the reproducible bug reports are in
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 </details>
 
