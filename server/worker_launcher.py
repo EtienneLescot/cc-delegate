@@ -11,6 +11,13 @@ as it arrives:
 - a hard timeout (and cancel_task) kills the whole process TREE — killing
   only the direct child leaves grandchildren holding the stdout pipe, which
   is how a stuck command once froze a delegation for 20+ minutes;
+- a shorter **stall watchdog** races the hard timeout: if the worker goes
+  silent (no PROGRESS/QUESTION line) for longer than ``stall_timeout_s``
+  (default 5 min), it's killed early instead of sitting until the full run
+  budget expires. Catches a hung single model call — most often
+  RubricMiddleware's post-loop grading step, which produces no stdout of its
+  own while it waits on the provider. Exempts ``needs_input``, an
+  intentional bounded wait for a supervisor answer;
 - any non-succeeded ending triggers a salvage pass so completed-but-
   uncommitted work still reaches fetch_task_result.
 """
@@ -61,6 +68,10 @@ def _build_args(cfg: Config, args: dict[str, Any]) -> list[str]:
         cli += ["--definition-of-done", args["definition_of_done"]]
     if args.get("test_command"):
         cli += ["--test-command", args["test_command"]]
+    if args.get("fallback_models"):
+        cli += ["--fallback-models", ",".join(args["fallback_models"])]
+    if args.get("max_budget_usd") is not None:
+        cli += ["--max-budget-usd", str(args["max_budget_usd"])]
     return cli
 
 
@@ -150,7 +161,10 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
         await proc.wait()
 
     def _finalize_failure(error: str, kind: str = "failed") -> None:
-        job["status"] = "cancelled" if rt.get("cancelled") else "failed"
+        # `kind` doubles as the terminal job status (except when cancelled),
+        # so "timeout" actually reaches get_task_status/the status line
+        # instead of always collapsing to "failed".
+        job["status"] = "cancelled" if rt.get("cancelled") else kind
         job["error"] = "cancelled by supervisor" if rt.get("cancelled") else error
         job.pop("question", None)
         if salvage_worktree(cfg.work_dir, job):
@@ -162,15 +176,73 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
             "error": job["error"], "salvaged": job.get("salvaged", False),
         })
 
+    async def _cancel_quietly(task: asyncio.Task) -> None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - best-effort teardown
+            pass
+
+    async def _watchdog() -> str:
+        """Detects a worker gone silent — a hung single model call (most often
+        RubricMiddleware's grading step, which runs after the main loop and
+        emits no PROGRESS line of its own) leaves nothing in stdout to react
+        to, so without this the run sits until the full `timeout_ms` budget
+        expires. Exempts `needs_input`: that pause is an intentional, already
+        bounded wait for a supervisor answer (up to DELEGATE_ASK_TIMEOUT_S),
+        not a hang.
+        """
+        while True:
+            await asyncio.sleep(5)
+            if job.get("status") == "needs_input":
+                continue
+            last = job.get("lastActivityTs") or job.get("startedAt") or time.time()
+            idle = time.time() - last
+            if idle > cfg.stall_timeout_s:
+                return f"no activity for {int(idle)}s"
+
+    consume_task = asyncio.create_task(consume())
+    watchdog_task = asyncio.create_task(_watchdog())
+
     try:
-        await asyncio.wait_for(consume(), timeout=timeout_ms / 1000)
-    except asyncio.TimeoutError:
-        kill_tree(proc.pid)
-        _finalize_failure(f"worker timed out after {timeout_ms} ms", kind="timeout")
-        return
+        done, _pending = await asyncio.wait(
+            {consume_task, watchdog_task},
+            timeout=timeout_ms / 1000,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
     except Exception as e:  # noqa: BLE001 - any launcher failure becomes a job failure
+        await _cancel_quietly(consume_task)
+        await _cancel_quietly(watchdog_task)
         kill_tree(proc.pid)
         _finalize_failure(f"{type(e).__name__}: {e}")
+        return
+
+    if consume_task in done:
+        await _cancel_quietly(watchdog_task)
+        try:
+            consume_task.result()
+        except Exception as e:  # noqa: BLE001 - consume() itself raised
+            kill_tree(proc.pid)
+            _finalize_failure(f"{type(e).__name__}: {e}")
+            return
+        # Fell through: consume() finished normally — proceed to result parsing below.
+    elif watchdog_task in done:
+        await _cancel_quietly(consume_task)
+        reason = watchdog_task.result()
+        kill_tree(proc.pid)
+        _finalize_failure(
+            f"worker stalled: {reason} (likely a hung model call, e.g. rubric grading) — "
+            f"killed after the {cfg.stall_timeout_s}s stall timeout instead of waiting the "
+            f"full {timeout_ms}ms run timeout",
+            kind="timeout",
+        )
+        return
+    else:
+        # Neither finished within the overall run budget — the pre-existing hard cap.
+        await _cancel_quietly(consume_task)
+        await _cancel_quietly(watchdog_task)
+        kill_tree(proc.pid)
+        _finalize_failure(f"worker timed out after {timeout_ms} ms", kind="timeout")
         return
 
     final_line = result_line or find_last_result_line("\n".join(tail_lines))

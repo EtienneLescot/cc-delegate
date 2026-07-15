@@ -73,7 +73,13 @@ provider works).
 `run_dev_task` accepts an optional `profile` name resolved against the user's configured menu
 (see `provider_status`). **The user owns model selection**: only pass a non-default `profile`
 when the user explicitly asked for it in this conversation ("delegate this on the cheap
-profile"). Quotas, keys, and knowledge of which models work belong to the user.
+profile"). Quotas, keys, and knowledge of which models work belong to the user. A profile may
+carry `fallback_models` (set via `set_model_profile`) — you don't need to do anything for those
+to take effect, they're transparent to you; litellm tries them in order if the primary model's
+call fails.
+
+`run_dev_task` also accepts `max_budget_usd` to override the default cap (`DELEGATE_MAX_BUDGET_USD`,
+$5) for an unusually large or cheap task — only when the user asked for a different cap.
 
 ## Configuration tools — explicit user request only
 

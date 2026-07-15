@@ -91,16 +91,27 @@ def set_profile(
     model: str,
     api_key_env_var: str | None = None,
     api_base: str | None = None,
+    fallback_models: list[str] | None = None,
 ) -> dict[str, Any]:
     err = validate_model_string(model)
     if err:
         raise ValueError(err)
+    if fallback_models:
+        for fm in fallback_models:
+            ferr = validate_model_string(fm)
+            if ferr:
+                raise ValueError(f"invalid fallback model {fm!r}: {ferr}")
     store = load_store()
     profile: dict[str, Any] = {"model": model}
     if api_key_env_var:
         profile["api_key_env_var"] = api_key_env_var
     if api_base:
         profile["api_base"] = api_base
+    if fallback_models:
+        # Same "<provider-prefix>:<model>" convention as the primary model,
+        # for one consistent format in the config file; the worker strips
+        # the prefix before handing these to litellm's own fallback kwarg.
+        profile["fallback_models"] = fallback_models
     store["profiles"][name] = profile
     if store["default_profile"] is None:
         store["default_profile"] = name
@@ -170,6 +181,7 @@ def resolve_profile(profile_name: str | None, env_defaults: dict[str, Any]) -> d
         "api_key_env_var": env_var,
         "api_base": chosen.get("api_base"),
         "api_key": api_key,
+        "fallback_models": chosen.get("fallback_models") or [],
         "source": source,
     }
 

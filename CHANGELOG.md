@@ -3,6 +3,70 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.10.0
+
+Reliability batch: fallback model chains, mid-run budget enforcement, and an enforced (not just
+prompted) git safety guard. Three self-contained items from the roadmap's reliability track.
+
+### Added
+
+- **litellm fallback chains per profile.** `set_model_profile(..., fallback_models=[...])` (same
+  `"provider:model"` convention as the primary model) stores an ordered backup list; when set,
+  the worker builds a `ChatLiteLLM` instance directly (bypassing deepagents' string-based
+  `init_chat_model` resolution, which has no fallback hook) with `model_kwargs={"fallbacks": [...]}`
+  — litellm's own `completion_with_fallbacks` then tries each in order if the primary model's call
+  fails. With no fallbacks configured (unchanged default), the worker still gets a bare model
+  string, exactly as before.
+- **Mid-run budget enforcement.** `run_dev_task(..., max_budget_usd=...)` (default from
+  `DELEGATE_MAX_BUDGET_USD`, $5) is threaded to the worker via `--max-budget-usd`. Checked after
+  every graph step against the live `CostTracker` accumulator; the run stops itself and reports
+  `status: "failed"` with the cost figures once the cap is crossed, instead of running unbounded.
+  Verified end-to-end with a $0.00001 cap: stopped after exactly one model call ($0.0026).
+- **Enforced git safety guard.** The system prompt already forbids `git push`/`merge`/`rebase` —
+  `SupervisedShellBackend` now actually blocks them (a worker only ever operates on its own
+  disposable branch, so there's never a legitimate reason for it to touch shared history). Uses a
+  lookahead (not `\b`) so read-only lookalikes like `git merge-base` or `git log --merges` aren't
+  caught.
+- **`worker/test_worker.py`**: standalone PEP-723 test file (`uv run worker/test_worker.py`) for
+  `build_model`, the git guard, and the drive-scan guard — worker.py's heavy deps keep it outside
+  `server/`'s stdlib-only suite. `server/test_config_store.py` covers the profile schema
+  round-trip. 77 server tests + 7 worker tests pass.
+
+## 0.9.0
+
+Stall watchdog. Direct fix for a failure observed in the first real-world test of the v0.8.0
+polling model: a worker finished its actual work (tests green, own summary confirming success)
+then went completely silent for 12+ minutes until the full 30-minute run timeout killed it —
+almost certainly a hung call inside `RubricMiddleware`'s post-loop grading step, which produces
+no stdout of its own while it waits on the provider, so a stuck graph step is indistinguishable
+from a crash except by elapsed silence.
+
+### Added
+
+- **Stall watchdog** (`DELEGATE_STALL_TIMEOUT_S`, default 300s). Races the worker's stdout
+  consumer: if `lastActivityTs` goes stale for longer than the stall timeout, the whole process
+  tree is killed and the run fails immediately instead of sitting until the full run timeout
+  (`DELEGATE_TIMEOUT_MS`, still 30 min by default) expires. Salvage still runs, so completed
+  work isn't lost. Exempts `needs_input`: a worker waiting on `answer_worker` is intentionally
+  idle for up to `DELEGATE_ASK_TIMEOUT_S` (600s) and must not be treated as stalled.
+- **`server/test_worker_launcher_stall.py`**: real integration tests against `run_worker` — a
+  mock subprocess standing in for the worker script exercises the actual `asyncio.wait` race
+  (stall detected well under the hard cap + salvaged; `needs_input` correctly exempt; normal
+  fast completion unaffected).
+
+### Fixed
+
+- **`job["status"]` could never actually become `"timeout"`.** `_finalize_failure` always set
+  status to `"failed"` (or `"cancelled"`) regardless of the `kind` argument passed at the call
+  site — so a hard-timeout run was reported as `failed`, even though `get_task_status`'s
+  `TERMINAL_STATES`, the status line, and the skill's own guidance ("on failed / timeout /
+  cancelled...") all already assumed `"timeout"` was a reachable status. Fixed by having `kind`
+  actually drive `job["status"]`.
+- **`answer_worker` didn't reset `lastActivityTs`.** After answering a blocked worker, the
+  timestamp still reflected the moment the question was *asked* — potentially many minutes
+  earlier — which would have made the new stall watchdog treat a freshly-resumed worker as
+  already stalled the instant it left `needs_input`. Now refreshed on delivery.
+
 ## 0.8.0
 
 Two-tier polling + scheduled supervision. Clarifies the supervision model and splits status by

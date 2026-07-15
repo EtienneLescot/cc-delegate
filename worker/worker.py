@@ -51,6 +51,15 @@ DEFAULT_ASK_TIMEOUT = 600
 # a reason to leave the worktree — refuse outright and tell the model why.
 _DRIVE_SCAN_RE = re.compile(r"""\bfind\s+['"]?(?:/|[A-Za-z]:[/\\]?)['"]?(?:\s|$)""")
 
+# The system prompt already tells the worker never to push/merge/rebase — this
+# is that rule ENFORCED at the tool level instead of trusted on the model's
+# word, since a worker only ever operates on its own disposable branch and
+# there is never a legitimate reason for it to touch shared history itself.
+# `(?=\s|$)` (not `\b`) so read-only lookalikes like `git merge-base` or
+# `git log --merges` aren't caught — `\b` alone matches between "merge" and
+# the hyphen in "merge-base" too, which would wrongly block it.
+_DANGEROUS_GIT_RE = re.compile(r"""\bgit\s+(push|merge|rebase)(?=\s|$)""", re.IGNORECASE)
+
 
 def emit_progress(payload: dict) -> None:
     print(PROGRESS_MARKER + json.dumps(payload), flush=True)
@@ -133,6 +142,15 @@ class SupervisedShellBackend(LocalShellBackend):
                     "Error: refusing to scan a filesystem/drive root. Everything relevant is "
                     "inside the current working directory — search there instead "
                     "(e.g. `find . -name ...` or `ls <subdir>`)."
+                ),
+                exit_code=1,
+                truncated=False,
+            )
+        if _DANGEROUS_GIT_RE.search(command):
+            return ExecuteResponse(
+                output=(
+                    "Error: git push/merge/rebase are blocked for the worker. Finish your changes "
+                    "on this branch and stop — the supervisor reviews and merges."
                 ),
                 exit_code=1,
                 truncated=False,
@@ -496,6 +514,37 @@ def _last_message_content(messages: list) -> object | None:
     return _message_content(messages[-1])
 
 
+def _bare_model(model_str: str) -> str:
+    """Strip the langchain '<provider-prefix>:' convention litellm doesn't use.
+
+    ``"litellm:minimax/MiniMax-M3"`` -> ``"minimax/MiniMax-M3"``. Matches the
+    convention already used by ``statusline_render.pretty_model`` server-side.
+    """
+    return model_str.split(":", 1)[-1] if ":" in model_str else model_str
+
+
+def build_model(model_str: str, fallback_models: list[str] | None):
+    """Return what to hand create_deep_agent's ``model=`` argument.
+
+    With no fallbacks configured (the default, common case), this is just the
+    bare model STRING — unchanged behavior, resolved by deepagents' own
+    ``init_chat_model``. With fallbacks, construct a ``ChatLiteLLM`` instance
+    directly instead: ``model_kwargs`` is spread verbatim into every
+    ``litellm.completion(...)`` call, and litellm's own ``fallbacks`` kwarg
+    triggers ``completion_with_fallbacks`` — tried in order if the primary
+    model's call fails. Bypassing deepagents' string-based resolution is the
+    only way to reach this litellm-level parameter.
+    """
+    if not fallback_models:
+        return model_str
+    from langchain_litellm import ChatLiteLLM
+
+    return ChatLiteLLM(
+        model=_bare_model(model_str),
+        model_kwargs={"fallbacks": [_bare_model(fm) for fm in fallback_models]},
+    )
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--worktree", required=True)
@@ -509,7 +558,15 @@ def main() -> int:
     p.add_argument("--rubric-max-iterations", type=int, default=6)
     p.add_argument("--command-timeout", type=int, default=DEFAULT_COMMAND_TIMEOUT,
                     help="Per-shell-command timeout in seconds (whole process tree killed on expiry).")
+    p.add_argument("--fallback-models", default=None,
+                    help="Comma-separated litellm model strings (same 'provider:model' convention "
+                         "as --model) tried in order via litellm's own fallback mechanism if the "
+                         "primary model's call fails.")
+    p.add_argument("--max-budget-usd", type=float, default=None,
+                    help="Stop and report once accumulated cost_usd crosses this cap, instead of "
+                         "running unbounded.")
     args = p.parse_args()
+    fallback_models = [m.strip() for m in args.fallback_models.split(",") if m.strip()] if args.fallback_models else None
 
     # DELEGATE_API_KEY is optional: OAuth-based providers (github_copilot,
     # chatgpt) authenticate from litellm's local token caches instead of a key.
@@ -542,8 +599,9 @@ def main() -> int:
     # by design; on_evaluation is the documented way to observe the grader's
     # verdict without a checkpointer.
     rubric_evaluations: list[dict] = []
+    model = build_model(args.model, fallback_models)
     agent = create_deep_agent(
-        model=args.model,
+        model=model,
         tools=[report_progress, ask_supervisor, report_blocker],
         backend=backend,
         system_prompt=SYSTEM_PROMPT,
@@ -579,6 +637,7 @@ def main() -> int:
         # node emitted the full message list — we keep the longest one seen.
         step_counter = 0
         accumulated_messages: list = []
+        budget_exceeded = False
         for update in agent.stream(
             invoke_state,
             config={"recursion_limit": args.recursion_limit},
@@ -603,11 +662,30 @@ def main() -> int:
                     payload["note"] = note
                 emit_progress(payload)
 
+                # Stop as soon as accumulated spend crosses the cap, rather
+                # than running unbounded — checked after every step so the
+                # overrun is at most one model call past the cap.
+                if args.max_budget_usd is not None and tracker.cost_usd > args.max_budget_usd:
+                    budget_exceeded = True
+                    emit_progress({
+                        "kind": "report",
+                        "note": f"budget exceeded: ${tracker.cost_usd:.4f} > cap ${args.max_budget_usd:.2f}; stopping",
+                    })
+                    break
+            if budget_exceeded:
+                break
+
         messages = accumulated_messages
         result["turns"] = len(messages)
         result["summary"] = _last_message_content(messages)
         result["rubric_status"] = rubric_evaluations[-1]["result"] if rubric_evaluations else None
-        if rubric:
+        if budget_exceeded:
+            result["status"] = "failed"
+            result["error"] = (
+                f"budget exceeded: cost so far ${tracker.cost_usd:.4f} crossed the "
+                f"${args.max_budget_usd:.2f} cap; stopped early instead of running unbounded"
+            )
+        elif rubric:
             result["status"] = "succeeded" if result["rubric_status"] == "satisfied" else "failed"
             if result["status"] == "failed":
                 result["error"] = f"rubric not satisfied: {result['rubric_status']}"

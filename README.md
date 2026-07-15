@@ -209,9 +209,15 @@ uv run python -m unittest discover -s server -p "test_*.py"
 ## Safety
 
 The worker's `LocalShellBackend` runs in `virtual_mode=True`, scoping filesystem and shell access
-to the disposable git worktree — it never runs `git push` or merges (also enforced via its system
-prompt). The supervisor always reviews the resulting diff before deciding whether to merge branch
+to the disposable git worktree. `git push`/`merge`/`rebase` are **enforced**, not just prompted
+against — `SupervisedShellBackend` blocks them at the tool level (a worker only ever operates on
+its own disposable branch, so there's never a legitimate reason to touch shared history itself).
+The supervisor always reviews the resulting diff before deciding whether to merge branch
 `delegate/<task_id>`.
+
+**Budget cap.** `run_dev_task(..., max_budget_usd=...)` (default from `DELEGATE_MAX_BUDGET_USD`,
+$5) stops the worker as soon as accumulated cost crosses the cap, instead of running unbounded —
+checked after every step against the live cost tracker.
 
 ## Configuration
 
@@ -222,6 +228,9 @@ conversationally from Claude Code — no restart needed, changes apply to the ne
   and per-profile auth state (key reachable? OAuth token cache present?).
 - *"Add a deepseek profile"* → `set_model_profile("deepseek", "litellm:deepseek/deepseek-chat",
   "DEEPSEEK_API_KEY")`; `set_default_profile` / `remove_model_profile` manage the menu.
+- *"Add a fallback to deepseek if MiniMax fails"* → `set_model_profile("mm", "litellm:minimax/MiniMax-M3",
+  "MINIMAX_API_KEY", fallback_models=["litellm:deepseek/deepseek-chat"])` — tried in order via
+  litellm's own fallback mechanism if the primary model's call fails.
 - *"Store my key for the deepseek profile"* → `store_api_key("deepseek")` asks you for the key
   through a native Claude Code dialog (MCP elicitation, Claude Code >= 2.1.199): **the secret
   goes straight back to the server without ever entering the model's conversation.**

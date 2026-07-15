@@ -38,6 +38,28 @@ class TestProfiles(StoreTestCase):
         with self.assertRaises(ValueError):
             config_store.set_profile("bad", "no-prefix-model")
 
+    def test_fallback_models_round_trip(self):
+        config_store.set_profile(
+            "mm", "litellm:minimax/MiniMax-M3", "MINIMAX_API_KEY",
+            fallback_models=["litellm:minimax/MiniMax-Text-01", "litellm:anthropic/claude-haiku-4-5"],
+        )
+        store = config_store.load_store()
+        self.assertEqual(
+            store["profiles"]["mm"]["fallback_models"],
+            ["litellm:minimax/MiniMax-Text-01", "litellm:anthropic/claude-haiku-4-5"],
+        )
+
+    def test_fallback_models_validated_like_the_primary_model(self):
+        with self.assertRaises(ValueError):
+            config_store.set_profile(
+                "mm", "litellm:minimax/MiniMax-M3", fallback_models=["no-prefix-model"],
+            )
+
+    def test_empty_fallback_models_not_persisted(self):
+        config_store.set_profile("mm", "litellm:minimax/MiniMax-M3", fallback_models=[])
+        store = config_store.load_store()
+        self.assertNotIn("fallback_models", store["profiles"]["mm"])
+
     def test_remove_reassigns_default(self):
         config_store.set_profile("a", "litellm:x/y")
         config_store.set_profile("b", "litellm:x/z")
@@ -57,6 +79,15 @@ class TestResolution(StoreTestCase):
         r = config_store.resolve_profile(None, self.ENV_DEFAULTS)
         self.assertEqual(r["model"], "litellm:env/model")
         self.assertIn("legacy", r["source"])
+        self.assertEqual(r["fallback_models"], [])  # always present, never None
+
+    def test_resolve_surfaces_fallback_models(self):
+        config_store.set_profile(
+            "mm", "litellm:minimax/MiniMax-M3",
+            fallback_models=["litellm:minimax/MiniMax-Text-01"],
+        )
+        r = config_store.resolve_profile("mm", self.ENV_DEFAULTS)
+        self.assertEqual(r["fallback_models"], ["litellm:minimax/MiniMax-Text-01"])
 
     def test_default_profile_wins_over_env(self):
         config_store.set_profile("mm", "litellm:minimax/MiniMax-M3", "MINIMAX_API_KEY")

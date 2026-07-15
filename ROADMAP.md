@@ -26,7 +26,7 @@ See [docs/specs/001-pure-python-migration.md](docs/specs/001-pure-python-migrati
       `~/.cc-delegate/config.json` read per-task.
 - [x] **GitHub Copilot OAuth** (released 0.3.2): device flow via litellm's native
       `github_copilot` provider, relayed by `setup_provider_auth` / `auth_poll`.
-- [ ] litellm fallback chains (per profile)
+- [x] **litellm fallback chains** (released 0.10.0): `set_model_profile(..., fallback_models=[...])`.
 
 ## v0.4.0 — supervision, communication & resilience (released 2026-07-12)
 
@@ -88,5 +88,8 @@ See [docs/specs/002-oauth-subscription-providers.md](docs/specs/002-oauth-subscr
 - Parallel multi-task delegation — architecture already supports concurrent worktrees, and v0.8.0
   added decompose/parallelize guidance to the skill; a helper to fan out + track a batch could come
   later.
-- Mid-run budget enforcement (cut the run when accumulated `cost_usd` crosses the cap)
-- Fine-grained tool policy for the worker (allow/deny beyond the current system-prompt rules)
+- [x] **Mid-run budget enforcement** (released 0.10.0): `run_dev_task(..., max_budget_usd=...)`,
+      checked after every step against the live cost tracker.
+- [x] **Enforced git safety guard** (released 0.10.0): `git push`/`merge`/`rebase` are blocked at
+      the shell-backend level, not just prompted against. Broader fine-grained tool policy
+      (arbitrary allow/deny beyond this) remains open if a real need for it shows up.

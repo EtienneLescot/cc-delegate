@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +55,9 @@ TERMINAL_STATES = {"succeeded", "failed", "timeout", "cancelled"}
         "schedule (or when the user asks). Use the cheap get_task_status for liveness "
         "(running / needs_input / done), get_task_progress for an occasional deeper audit "
         "(files written, recent activity), answer_worker to unblock a question, and "
-        "fetch_task_result when done."
+        "fetch_task_result when done. max_budget_usd caps accumulated spend (default from "
+        "DELEGATE_MAX_BUDGET_USD, $5) — the worker stops itself and reports what it had once "
+        "the cap is crossed, rather than running unbounded."
     )
 )
 async def run_dev_task(
@@ -66,6 +69,7 @@ async def run_dev_task(
     recursion_limit: int | None = None,
     timeout_ms: int | None = None,
     profile: str | None = None,
+    max_budget_usd: float | None = None,
 ) -> str:
     # Resolve model/key per task from the config store (facade profiles),
     # falling back to legacy env config. Read fresh each call so facade
@@ -118,6 +122,8 @@ async def run_dev_task(
         "model": resolved["model"],
         "api_key_env_var": resolved["api_key_env_var"],
         "api_key": resolved["api_key"],
+        "fallback_models": resolved["fallback_models"],
+        "max_budget_usd": max_budget_usd or cfg.default_max_budget_usd,
     }
     # The worker runs as a background asyncio task; job state is mutated live
     # by worker_launcher (same event loop) and mirrored to disk on every change.
@@ -189,8 +195,6 @@ async def get_task_status(task_id: str) -> str:
     )
 )
 async def get_task_progress(task_id: str, activity_limit: int = 12) -> str:
-    import time as _time
-
     j = get_job_with_fallback(task_id, cfg.work_dir)
     if not j:
         return json.dumps({"error": "unknown task_id"})
@@ -203,9 +207,9 @@ async def get_task_progress(task_id: str, activity_limit: int = 12) -> str:
         "latest_note": j.get("progress"),
     }
     if j.get("startedAt"):
-        payload["elapsed_s"] = round(_time.time() - j["startedAt"])
+        payload["elapsed_s"] = round(time.time() - j["startedAt"])
     if j.get("lastActivityTs"):
-        payload["last_activity_age_s"] = round(_time.time() - j["lastActivityTs"])
+        payload["last_activity_age_s"] = round(time.time() - j["lastActivityTs"])
 
     # Live audit of what the worker has actually written in its worktree.
     if j.get("worktree"):
@@ -348,6 +352,11 @@ async def answer_worker(task_id: str, answer: str) -> str:
 
     j["status"] = "running"
     j["lastQuestion"] = j.pop("question")
+    # Reset the stall clock: without this, lastActivityTs is still the moment
+    # the question was ASKED (which may have been many minutes ago), and the
+    # worker_launcher stall watchdog would treat the resumed run as already
+    # expired the instant it stops being "needs_input".
+    j["lastActivityTs"] = time.time()
     persist_job(j, cfg.work_dir)
     events.publish(
         j["repo"], task_id,
@@ -413,7 +422,10 @@ async def provider_status() -> str:
     description=(
         "Creates or updates a named model profile in the persistent config store. Applies "
         "immediately (no Claude Code restart). Only call when the user explicitly asked to "
-        "add or change a profile."
+        "add or change a profile. Optional fallback_models (same 'provider:model' convention "
+        "as model, e.g. ['litellm:minimax/MiniMax-Text-01']) are tried in order via litellm's "
+        "own fallback mechanism if the primary model's call fails — only set this when the "
+        "user explicitly asked for fallback/backup models."
     )
 )
 async def set_model_profile(
@@ -421,9 +433,10 @@ async def set_model_profile(
     model: str,
     api_key_env_var: str | None = None,
     api_base: str | None = None,
+    fallback_models: list[str] | None = None,
 ) -> str:
     try:
-        prof = config_store.set_profile(name, model, api_key_env_var, api_base)
+        prof = config_store.set_profile(name, model, api_key_env_var, api_base, fallback_models)
     except ValueError as e:
         return json.dumps({"error": str(e)})
     return json.dumps({"profile": name, "saved": True, **prof})

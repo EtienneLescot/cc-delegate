@@ -19,6 +19,7 @@ class Config:
     default_timeout_ms: int
     work_dir: str
     command_timeout_s: int
+    stall_timeout_s: int
 
 
 def load_config() -> Config:
@@ -40,4 +41,10 @@ def load_config() -> Config:
         # (e.g. a whole-drive find) must cost at most this, not the whole
         # task timeout.
         command_timeout_s=int(os.environ.get("DELEGATE_CMD_TIMEOUT_S", "120")),
+        # A run goes completely silent (no PROGRESS/QUESTION line) whenever a
+        # single model call hangs — e.g. RubricMiddleware's grading call after
+        # the main loop finishes — since a stuck graph step yields no update.
+        # That's indistinguishable from a crash except by elapsed silence, so
+        # bound it far below the full run timeout instead of waiting it out.
+        stall_timeout_s=int(os.environ.get("DELEGATE_STALL_TIMEOUT_S", "300")),
     )
