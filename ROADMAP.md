@@ -71,12 +71,18 @@ See [docs/specs/002-oauth-subscription-providers.md](docs/specs/002-oauth-subscr
 
 ## Visibility / traction (parallel track)
 
-- [ ] Tag + GitHub release for v0.2.0 (current v0.1.0 release describes the abandoned
-      Claude-Agent-SDK architecture)
-- [ ] Demo GIF/asciinema of a full delegation round-trip
-- [ ] README comparison table vs. adjacent projects (per-call routing vs. full-task delegation,
-      worktree isolation, rubric-gated convergence)
-- [ ] Submit to plugin/MCP directories; refresh the stale Glama listing
+- [x] **GitHub releases caught up to current** (2026-07-15): v0.5.0 through v0.12.0 published
+      with notes drawn from CHANGELOG.md (v0.9.0 has no standalone tag — it landed combined with
+      v0.10.0 in one commit, so its notes are merged into the v0.10.0 release, matching the real
+      git history rather than implying two separate releases happened).
+- [x] **Demo GIF redone** (2026-07-15, draft pending user review before publishing): new narrative
+      reflecting the current async model — `run_dev_task` returns immediately, a "time passing"
+      beat, then a discrete `get_task_status`/`get_task_progress` poll rather than a live stream.
+- [x] **README comparison table vs. adjacent projects** (2026-07-15): real research (houtini-lm,
+      Roo Code's Orchestrator/Boomerang Tasks) rather than written from memory — per-call routing
+      vs. full-task delegation, worktree isolation, rubric-gated convergence.
+- [ ] Submit to plugin/MCP directories; refresh the stale Glama listing — external/public action,
+      confirm scope with the user before attempting.
 - [ ] Write-up of the build journey (three worker engines tried, two upstream bugs documented)
 
 ## Later / unscheduled

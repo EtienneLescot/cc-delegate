@@ -151,6 +151,27 @@ terminal UI. Calling `deepagents` directly as a library sidesteps both: no CLI, 
 and it gives us real control over the loop (subagents, rubric-based convergence) instead of a
 black-box CLI. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the Claude Agent SDK auth bug writeup.
 
+## How this compares
+
+None of these are direct competitors — each targets a different point in the design space, and
+we haven't used any of them hands-on, so treat this as directional rather than exhaustive:
+
+| | **cc-delegate** | [houtini-lm](https://github.com/houtini-ai/houtini-lm) | [Roo Code](https://docs.roocode.com/features/boomerang-tasks) Orchestrator |
+|---|---|---|---|
+| Unit of delegation | A whole bounded task (multi-turn, its own agent loop) | A single bounded call, routed per request | A subtask within Roo's own orchestrator/mode system |
+| Isolation | Disposable git worktree + branch per task | None (stateless call-through) | Own context per subtask; no git-level isolation |
+| "Is it actually done?" | `RubricMiddleware` grades against your `definition_of_done`/`test_command` — not the model's own say-so | Caller decides; no built-in completion gate | Orchestrator reads back the subtask's summary |
+| Where it plugs in | A Claude Code plugin (MCP) — supervisor stays Opus/Anthropic | An MCP server, also aimed at Claude Code | A standalone VS Code extension (not a Claude Code plugin) |
+| Provider reach | Any litellm-routable provider (100+) | LM Studio, Ollama, vLLM, DeepSeek, Groq, Cerebras | Per-mode provider config, incl. local via LiteLLM |
+| Supervisor cost model | Async: `run_dev_task` returns immediately, supervisor polls on its own schedule | Synchronous: caller waits on each delegated call | Synchronous: orchestrator waits on each subtask |
+
+**Where cc-delegate is different in practice**: it delegates the *whole task* — implement, test,
+iterate — behind one call, with the worktree isolating it from your working branch and the rubric
+grader deciding "done" instead of trusting the model. houtini-lm's per-call routing is a better
+fit if you want fine-grained control over which model handles which individual completion; Roo
+Code's orchestrator is a better fit if you want a full standalone IDE rather than a Claude Code
+plugin.
+
 ## Install
 
 Installing the plugin itself is one command (below), but two things live outside Claude Code's
