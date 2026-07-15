@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.11.0
+
+Proactive mid-run steering. The roadmap's "Later / unscheduled" item: the supervisor can now
+redirect a *running* worker at any moment, not only in reply to a question it asked.
+
+### Added
+
+- **`steer_task(task_id, message)`.** Drops a message in the worker's comm-dir mailbox
+  (`steer.json`, atomic write, single pending slot — a new call overwrites an undelivered one).
+  Doesn't block the worker and doesn't change its status; delivered opportunistically at its next
+  tool call rather than instantaneously, since a running LangGraph step can't be interrupted from
+  outside the process without a checkpointer (out of scope here — the existing architecture has
+  none). Verified end-to-end with a real worker run: a message dropped mid-task ("stop after
+  b.txt, skip c.txt") surfaced in the next shell command's output, the model acknowledged it in
+  its very next turn, and genuinely stopped short of the file the steering told it to skip.
+- **`check_steer_message()` / `_append_steer_notice()`** in the worker: read-and-clear the
+  mailbox, appending `⚠ SUPERVISOR STEERING (act on this now): <message>` to the return value of
+  `report_progress` and to `SupervisedShellBackend.execute`'s output (the two most frequent things
+  the worker does, maximizing how soon a steer message is actually seen). `SYSTEM_PROMPT` now
+  tells the worker to treat that marker as a live instruction overriding prior guidance.
+- 14 worker tests (mailbox read/clear, malformed-file safety, shell-backend surfacing) +
+  `events.event_message`'s new `"steer"` case. 78 server tests + 14 worker tests pass.
+
 ## 0.10.0
 
 Reliability batch: fallback model chains, mid-run budget enforcement, and an enforced (not just

@@ -75,6 +75,8 @@ def event_message(ev: dict[str, Any]) -> str:
         return "❓ " + str(ev.get("message") or "worker needs input")[:160]
     if kind == "answer":
         return "↩ supervisor answered"
+    if kind == "steer":
+        return "➜ supervisor steering: " + str(ev.get("message") or "")[:160]
     if kind == "started":
         return "worker started" + (f" · {ev['model']}" if ev.get("model") else "")
     if kind == "preflight":

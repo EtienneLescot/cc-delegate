@@ -7,12 +7,15 @@
 # ]
 # ///
 """Unit tests for worker.py's pure/isolable helpers: build_model (fallback
-chains), the dangerous-git command guard, and the drive-scan guard.
+chains), the dangerous-git command guard, the drive-scan guard, and the
+proactive steering mailbox (check_steer_message / _append_steer_notice).
 
 Not part of server/'s stdlib-only suite (worker.py needs the heavy deepagents
 + litellm stack) — run directly: `uv run worker/test_worker.py`.
 """
 
+import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -83,6 +86,69 @@ class TestDangerousGitGuard(unittest.TestCase):
 
             ok = backend.execute("echo hi")
             self.assertEqual(ok.exit_code, 0)
+
+
+class TestSteerMessage(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_comm_dir = os.environ.get("DELEGATE_COMM_DIR")
+        os.environ["DELEGATE_COMM_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        if self._orig_comm_dir is None:
+            os.environ.pop("DELEGATE_COMM_DIR", None)
+        else:
+            os.environ["DELEGATE_COMM_DIR"] = self._orig_comm_dir
+        self._tmp.cleanup()
+
+    def _write_steer(self, message: str) -> None:
+        path = os.path.join(self._tmp.name, "steer.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"message": message}, f)
+
+    def test_no_pending_message_returns_none(self):
+        self.assertIsNone(worker.check_steer_message())
+
+    def test_reads_and_clears_pending_message(self):
+        self._write_steer("use snake_case instead")
+        self.assertEqual(worker.check_steer_message(), "use snake_case instead")
+        # Cleared: a second read finds nothing left.
+        self.assertIsNone(worker.check_steer_message())
+
+    def test_malformed_file_does_not_raise(self):
+        path = os.path.join(self._tmp.name, "steer.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("not json")
+        self.assertIsNone(worker.check_steer_message())
+
+    def test_no_comm_dir_env_returns_none(self):
+        os.environ.pop("DELEGATE_COMM_DIR", None)
+        self.assertIsNone(worker.check_steer_message())
+
+    def test_append_steer_notice_passthrough_when_nothing_pending(self):
+        self.assertEqual(worker._append_steer_notice("progress update delivered"), "progress update delivered")
+
+    def test_append_steer_notice_appends_when_pending(self):
+        self._write_steer("stop, use a different filename")
+        text = worker._append_steer_notice("progress update delivered")
+        self.assertIn("progress update delivered", text)
+        self.assertIn("SUPERVISOR STEERING", text)
+        self.assertIn("stop, use a different filename", text)
+
+    def test_shell_backend_execute_surfaces_pending_steer(self):
+        import tempfile
+
+        self._write_steer("check the edge case for empty input")
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = worker.SupervisedShellBackend(
+                root_dir=tmp, virtual_mode=True, timeout=5, inherit_env=False, env={},
+            )
+            result = backend.execute("echo hi")
+        self.assertIn("hi", result.output)
+        self.assertIn("SUPERVISOR STEERING", result.output)
+        self.assertIn("check the edge case for empty input", result.output)
 
 
 if __name__ == "__main__":

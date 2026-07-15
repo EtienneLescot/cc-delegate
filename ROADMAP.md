@@ -79,12 +79,10 @@ See [docs/specs/002-oauth-subscription-providers.md](docs/specs/002-oauth-subscr
 
 ## Later / unscheduled
 
-- **Proactive mid-run steering** — let the supervisor redirect a *running* worker at any moment,
-  not only in reply to a question. Today `answer_worker` only reaches a worker that is blocked on
-  `ask_supervisor` (it reads its comm-dir mailbox once, while waiting). To steer proactively
-  ("stop X, do Y instead"), the worker must **poll its mailbox periodically during the run**; then
-  `answer_worker` (or a dedicated `steer_task`) can nudge it. Cheap to add, but changes the worker
-  loop — deferred until the async/poll model has settled in real use.
+- [x] **Proactive mid-run steering** (released 0.11.0): `steer_task(task_id, message)`. Delivered
+      opportunistically at the worker's next tool call (`report_progress` / shell command), not
+      instantaneously — genuine mid-LangGraph-step interruption would need a checkpointer, which
+      is a bigger change left for if real usage shows the delay matters.
 - Parallel multi-task delegation — architecture already supports concurrent worktrees, and v0.8.0
   added decompose/parallelize guidance to the skill; a helper to fan out + track a batch could come
   later.

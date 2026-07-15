@@ -322,6 +322,46 @@ async def cancel_task(task_id: str) -> str:
 
 @mcp.tool(
     description=(
+        "Proactively redirects a RUNNING worker at any moment — not just in reply to a question "
+        "it asked. Use to course-correct: 'stop implementing X, do Y instead', 'skip the tests for "
+        "now', 'the file should be named differently'. Delivered opportunistically at the worker's "
+        "next tool call (typically within seconds, not instantaneous) — it keeps working in the "
+        "meantime. Overwrites any not-yet-delivered steer message for this task; only the latest "
+        "guidance is kept, so batch related redirections into one call."
+    )
+)
+async def steer_task(task_id: str, message: str) -> str:
+    j = get_job_with_fallback(task_id, cfg.work_dir)
+    if not j:
+        return json.dumps({"error": "unknown task_id"})
+    if j.get("status") not in ("running", "needs_input"):
+        return json.dumps(
+            {"task_id": task_id, "error": f"task is not active (status: {j.get('status')})"}
+        )
+
+    comm_dir = comm_dir_for(j, cfg.work_dir)
+    try:
+        comm_dir.mkdir(parents=True, exist_ok=True)
+        steer_path = comm_dir / "steer.json"
+        tmp_path = comm_dir / "steer.json.tmp"
+        tmp_path.write_text(json.dumps({"message": message}), encoding="utf-8")
+        tmp_path.replace(steer_path)  # atomic: the worker never reads a half-written file
+    except OSError as e:
+        return json.dumps({"task_id": task_id, "error": f"could not write steer message: {e}"})
+
+    events.publish(
+        j["repo"], task_id, {"kind": "steer", "message": message[:300]}, cfg.work_dir
+    )
+    return json.dumps(
+        {
+            "task_id": task_id, "delivered": "pending",
+            "note": "delivered to the worker at its next tool call, not instantaneous",
+        }
+    )
+
+
+@mcp.tool(
+    description=(
         "Answers a worker that is blocked in status 'needs_input' (it called ask_supervisor or "
         "report_blocker). The answer is delivered out-of-band and the worker resumes immediately. "
         "If the question is a product/user decision, relay it to the user before answering."

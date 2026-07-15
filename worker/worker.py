@@ -201,7 +201,7 @@ class SupervisedShellBackend(LocalShellBackend):
                 )
                 if partial.strip():
                     msg += f"\n\nPartial output before the kill:\n{partial}"
-                return ExecuteResponse(output=msg, exit_code=124, truncated=False)
+                return ExecuteResponse(output=_append_steer_notice(msg), exit_code=124, truncated=False)
         except Exception as e:  # noqa: BLE001 - mirror base: errors become a response
             return ExecuteResponse(
                 output=f"Error executing command ({type(e).__name__}): {e}",
@@ -232,7 +232,9 @@ class SupervisedShellBackend(LocalShellBackend):
         if proc.returncode != 0:
             output = f"{output.rstrip()}\n\nExit code: {proc.returncode}"
 
-        return ExecuteResponse(output=output, exit_code=proc.returncode, truncated=truncated)
+        return ExecuteResponse(
+            output=_append_steer_notice(output), exit_code=proc.returncode, truncated=truncated
+        )
 
 
 # ── Supervisor communication tools ──────────────────────────────────────────
@@ -282,6 +284,42 @@ def _ask_blocking(kind: str, message: str, context: str) -> str:
     )
 
 
+def check_steer_message() -> str | None:
+    """Read-and-clear a pending supervisor steer message, or None.
+
+    Unlike ask_supervisor/report_blocker this never blocks — the supervisor
+    can push guidance at any moment via the steer_task MCP tool, and it just
+    sits in the comm dir until the worker's next tool call opportunistically
+    picks it up (there is no way to interrupt an in-flight LangGraph step
+    from outside, so "at any moment" really means "within one tool call").
+    """
+    comm_dir = os.environ.get("DELEGATE_COMM_DIR")
+    if not comm_dir:
+        return None
+    path = os.path.join(comm_dir, "steer.json")
+    if not os.path.isfile(path):
+        return None
+    message = None
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        message = payload.get("message")
+    except (OSError, json.JSONDecodeError, ValueError):
+        message = None
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return message if isinstance(message, str) and message else None
+
+
+def _append_steer_notice(text: str) -> str:
+    message = check_steer_message()
+    if not message:
+        return text
+    return f"{text}\n\n⚠ SUPERVISOR STEERING (act on this now): {message}"
+
+
 def report_progress(update: str) -> str:
     """Send a one-line progress update to the supervisor and the user's live dashboard.
 
@@ -293,7 +331,7 @@ def report_progress(update: str) -> str:
         update: one short sentence, e.g. "implemented src/auth/tokens.js, moving to tests".
     """
     emit_progress({"kind": "report", "note": str(update)[:300]})
-    return "progress update delivered"
+    return _append_steer_notice("progress update delivered")
 
 
 def ask_supervisor(question: str, context: str = "") -> str:
@@ -463,6 +501,10 @@ SYSTEM_PROMPT = (
     "Communicate upward while you work: call report_progress at each phase transition, "
     "ask_supervisor when the spec is ambiguous or a decision belongs to the user, and "
     "report_blocker after ~3 failed attempts at the same error instead of thrashing. "
+    "The supervisor may redirect you at any moment; if a shell command's output or a "
+    "report_progress result ends with a line starting '⚠ SUPERVISOR STEERING', that is a "
+    "live instruction from the supervisor — treat it as overriding prior guidance on that "
+    "point and act on it immediately, on your very next step. "
     "When the definition of done is met and the test command passes, write your final summary "
     "and STOP — do not keep re-verifying. The supervisor reviews and merges."
 )

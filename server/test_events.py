@@ -71,6 +71,11 @@ class TestEventMessage(unittest.TestCase):
             {"kind": "question", "message": "which token TTL?"}))
         self.assertTrue(events.event_message({"kind": "blocker", "message": "x"}).startswith("❓"))
 
+    def test_steer(self):
+        msg = events.event_message({"kind": "steer", "message": "use snake_case instead"})
+        self.assertIn("steering", msg)
+        self.assertIn("snake_case", msg)
+
     def test_terminal_states(self):
         self.assertIn("✓ done", events.event_message(
             {"kind": "succeeded", "files_changed": 4, "cost_usd": 0.24}))

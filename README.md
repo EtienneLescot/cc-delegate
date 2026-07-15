@@ -34,10 +34,11 @@ flowchart LR
   the worker runs in the background), `get_task_status` (cheap liveness: running / needs_input /
   done — poll it as often as you like), `get_task_progress` (verbose audit: files written so far,
   recent activity, cost — call occasionally), `answer_worker` (reply to a worker blocked on a
-  question), `cancel_task` (kill a stalled/runaway worker's whole process tree, salvaging its
-  work), `fetch_task_result` (final summary, patch, files changed, cost — including salvaged work
-  from failed runs), and `cleanup_task` (tear down a finished task's worktree, branch, and
-  persisted job file).
+  question), `steer_task` (proactively redirect a *running* worker at any moment — not only in
+  reply to a question — delivered at its next tool call), `cancel_task` (kill a stalled/runaway
+  worker's whole process tree, salvaging its work), `fetch_task_result` (final summary, patch,
+  files changed, cost — including salvaged work from failed runs), and `cleanup_task` (tear down
+  a finished task's worktree, branch, and persisted job file).
 - **Job persistence** — every job is mirrored to `<repo>/.cc-delegate/jobs/<task_id>.json` on
   each state change, so `get_task_status` / `fetch_task_result` / `cleanup_task` still work
   across MCP-server restarts: the in-memory registry is rebuilt from disk on demand.
@@ -116,7 +117,7 @@ variant) to `~/.claude/` and `chmod +x` it. A running task refreshes the line on
 blocked task keeps its question visible until you answer; a finished task shows a short-lived
 summary that then fades — no stale state left on screen.
 
-## Worker → supervisor communication
+## Worker → supervisor communication (and back)
 
 The worker is not fire-and-forget anymore. Three tools are injected into its agent loop:
 
@@ -133,8 +134,15 @@ The worker is not fire-and-forget anymore. Three tools are injected into its age
   thrashing until timeout.
 
 Answers travel out-of-band through a file mailbox in `<repo>/.cc-delegate/comm/<task_id>/` —
-never through the model conversation. If no answer arrives within `DELEGATE_ASK_TIMEOUT_S`
-(default 600s), the worker resumes with its best conservative judgment.
+never through the model conversation.
+
+**The other direction: `steer_task(task_id, message)`** lets the supervisor redirect a *running*
+worker at any moment, not only in reply to a question — "stop implementing X, do Y instead". It
+doesn't block the worker or change its status; the message sits in the same mailbox until the
+worker's next tool call opportunistically picks it up (typically within seconds — there's no way
+to interrupt an in-flight LangGraph step from outside without a checkpointer, which the current
+architecture doesn't have). Verified end-to-end: a message dropped mid-task surfaced in the next
+shell command's output, and the model genuinely changed course on its very next turn.
 
 We started with the worker calling `@anthropic-ai/claude-agent-sdk`'s `query()` pointed at a
 third-party endpoint, then tried shelling out to CLI coding agents (OpenCode, `dcode`) — both hit

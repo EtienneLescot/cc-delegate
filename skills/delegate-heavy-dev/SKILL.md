@@ -47,6 +47,10 @@ provider works).
      blocked (and times out to a conservative default after ~10 min).
    - If a run stalls or goes rogue, `cancel_task(task_id)` kills the whole process tree and salvages
      its work.
+   - **If you (or the user) spot something the worker should change mid-task** — even without a
+     question from it — call `steer_task(task_id, message)`. It doesn't block the worker; the
+     guidance is delivered at its next tool call (typically within seconds). Batch related
+     redirections into one call — a new steer message overwrites an undelivered one.
 4. **Review.** When `done` (status `succeeded`), call `fetch_task_result(task_id)`. Read the
    `summary`, open the `patch_path` diff, check `files_changed` and `tests`. On `failed` /
    `timeout` / `cancelled`, check `salvaged`: if true, the patch holds the worker's uncommitted
