@@ -75,15 +75,24 @@ See [docs/specs/002-oauth-subscription-providers.md](docs/specs/002-oauth-subscr
       with notes drawn from CHANGELOG.md (v0.9.0 has no standalone tag — it landed combined with
       v0.10.0 in one commit, so its notes are merged into the v0.10.0 release, matching the real
       git history rather than implying two separate releases happened).
-- [x] **Demo GIF redone** (2026-07-15, draft pending user review before publishing): new narrative
-      reflecting the current async model — `run_dev_task` returns immediately, a "time passing"
-      beat, then a discrete `get_task_status`/`get_task_progress` poll rather than a live stream.
+- [x] **Demo GIF published** (2026-07-15, commit 73bfd34): 1.5 MB optimized GIF (shared 96-color
+      palette, no dither) embedded in a centered README hero. Narrative reflects the current async
+      model — `run_dev_task` returns immediately, a "time passing" beat, then a discrete
+      `get_task_status`/`get_task_progress` poll rather than a live stream.
 - [x] **README comparison table vs. adjacent projects** (2026-07-15): real research (houtini-lm,
       Roo Code's Orchestrator/Boomerang Tasks) rather than written from memory — per-call routing
       vs. full-task delegation, worktree isolation, rubric-gated convergence.
-- [ ] Submit to plugin/MCP directories; refresh the stale Glama listing — external/public action,
-      confirm scope with the user before attempting.
-- [ ] Write-up of the build journey (three worker engines tried, two upstream bugs documented)
+- [x] **Build-journey write-up** (2026-07-15): [docs/build-journey.md](docs/build-journey.md) —
+      three worker engines tried (Claude Agent SDK → OpenCode/dcode CLIs → deepagents library),
+      two upstream bugs documented, linked from the README. Doubles as external-post material.
+- [x] **Glama listing** (2026-07-15): the auto-crawl already re-indexed the current Python
+      architecture (A-grade, not stale as feared). Added `glama.json` (`maintainers:
+      ["EtienneLescot"]`) to claim ownership and move it out of the anonymous-crawl pile.
+- [ ] **Community plugin marketplace** — `anthropics/claude-plugins-community` auto-closes PRs;
+      submission is the form at `clau.de/plugin-directory-submission`, gated by Anthropic's review
+      pipeline. User-submitted (needs their identity); listing text is prepped and ready.
+- [ ] Curated `awesome-claude-plugins` lists (ComposioHQ, GiladShoham, Chat2AnyLLM) — formats vary
+      (link-list vs. copy-plugin-in marketplace); open PRs per-repo on the user's go-ahead.
 
 ## Later / unscheduled
 
